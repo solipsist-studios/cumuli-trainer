@@ -1,0 +1,6 @@
+Required Notice: Copyright 2026 Solipsist Studios Inc. (https://solipsist.studio)
+
+This software calls gsplat (https://github.com/nerfstudio-project/gsplat),
+Copyright the gsplat contributors, licensed under the Apache License 2.0, as
+an unmodified runtime dependency. No gsplat source code is included. See
+PROVENANCE.md.

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cumuli-trainer"
+version = "0.1.0"
+description = "4D Gaussian splatting trainer for the Cumuli pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+authors = [{ name = "Solipsist Studios Inc." }]
+# torch and gsplat are not listed: the target env pins torch 2.13.0+cu130 and a
+# gsplat JIT-built against it, and pip must never try to replace either.
+dependencies = [
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "tqdm",
+    "pillow",
+    "torchmetrics",
+    "lpips",
+    "cumuli-core @ git+https://github.com/solipsist-studios/cumuli-core.git@v0.1.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+cumuli-train = "cumuli_trainer.cli:main"
+
+# Built-in plugins register through the same entry-point groups an external
+# package would use, so the loader has one code path.
+[project.entry-points."cumuli_trainer.representations"]
+spacetime = "cumuli_trainer.representations.spacetime:SpacetimeRepresentation"
+
+[project.entry-points."cumuli_trainer.strategies"]
+mcmc = "cumuli_trainer.strategies.mcmc:MCMCStrategy"
+default = "cumuli_trainer.strategies.default:DefaultStrategy"
+
+[project.entry-points."cumuli_trainer.losses"]
+l1 = "cumuli_trainer.losses.photometric:L1Loss"
+ssim = "cumuli_trainer.losses.photometric:SSIMLoss"
+opacity_mask = "cumuli_trainer.losses.masks:OpacityMaskLoss"
+opacity_reg = "cumuli_trainer.losses.regularizers:OpacityReg"
+scale_reg = "cumuli_trainer.losses.regularizers:ScaleReg"
+
+[project.entry-points."cumuli_trainer.renderers"]
+gsplat = "cumuli_trainer.renderers.gsplat_renderer:GsplatRenderer"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["gpu: needs CUDA and gsplat"]

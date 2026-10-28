@@ -1,0 +1,12 @@
+# Parity run against the OMG4 baseline on the synthetic 12-camera ring.
+source_path: /home/jeffsipko/Dev/datasets/synth_runs/dur_12/dataset_4dgs
+model_path: /home/jeffsipko/Dev/datasets/synth_runs/trainer_dev/parity
+time_duration: [0.0, 0.458333]
+fps: 24
+iterations: 30000
+sh_degree: 3
+strategy:
+  name: mcmc
+  cap_max: 300000
+test_iterations: [7000, 30000]
+save_iterations: [30000]
