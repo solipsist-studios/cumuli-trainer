@@ -56,6 +56,10 @@ the accel handling in supersplat-viewer `src/core/sogst-motion.ts` and related
 message and file list, not the diff, of supersplat-viewer commit `b2d8caa`
 ("omg4: degree-2 motion (accel) playback support"). No code was taken from them.
 
+To test it, cumuli `scripts/bake_sogst.py` was run as a black box: its `--help`
+text, run log and output archive were read, and its source was not opened. The
+supersplat-viewer build and splat-transform CLI were run on the trained clips.
+
 ## Modules
 
 | module | written from |

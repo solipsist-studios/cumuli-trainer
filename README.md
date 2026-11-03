@@ -170,6 +170,13 @@ A degree-1 checkpoint or `init_ply` can continue at degree 2, starting from zero
 acceleration. A degree-2 one refuses to load at degree 1, because dropping the
 term would change the motion.
 
+Measured against degree 1, with two runs of each: no clear gain. On the
+12-frame synthetic `dur_12` set PSNR was within run-to-run noise (39.71 and 39.81
+dB against 39.58 and 39.78), LPIPS slightly better (0.0058 against 0.0060) and
+about 15% fewer Gaussians were exported. On 2 s of Heidi, held-out cam05 PSNR was
+slightly lower (36.17 and 36.14 dB against 36.23 and 36.25), with LPIPS within
+noise and a `.sogst` about 15% larger (one pack of each).
+
 Motion only trains on Gaussians drawn away from their `t_center`, since the
 gradient of `v*dt` and `a*dt*dt` is zero at `dt = 0`. On a two-frame clip the
 initial window fades each Gaussian below gsplat's 1/255 cull at the other frame,
