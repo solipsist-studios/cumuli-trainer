@@ -26,6 +26,13 @@ def _look_at_c2w_gl(eye, target=(0, 0, 0)):
     return m
 
 
+# Motion only trains on Gaussians drawn away from their t_center: the gradient
+# of v * dt and a * dt^2 is zero at dt = 0. With two frames the initial window
+# fades the other frame's Gaussians below gsplat's 1/255 cull, so every drawn
+# Gaussian has dt = 0. Tests of motion need these three frames.
+MOTION_TIMES = (0.0, 0.05, 0.1)
+
+
 def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
     from PIL import Image
     os.makedirs(root, exist_ok=True)
@@ -38,7 +45,7 @@ def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
                 rel = f"{split}/c{ci}_t{ti}"
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 img = np.zeros((h, w, 4), np.uint8)
-                img[h // 4: 3 * h // 4, w // 3: 2 * w // 3] = (200, 80 + 100 * ti, 40, 255)
+                img[h // 4: 3 * h // 4, w // 3: 2 * w // 3] = (200, min(80 + 100 * ti, 255), 40, 255)
                 Image.fromarray(img).save(os.path.join(root, rel + ".png"))
                 out.append({"file_path": rel, "time": t, "fl_x": 60.0, "fl_y": 60.0,
                             "cx": w / 2, "cy": h / 2, "w": w, "h": h,
@@ -154,3 +161,73 @@ def test_train_with_per_view_loss_weights(tmp_path):
     summary = Trainer(cfg, log=lines.append).run()
     assert any("per-view loss weights: 4 of 8 views differ from 1" in m for m in lines)
     assert math.isfinite(summary["tests"][-1]["psnr_db"]) and summary["tests"][-1]["psnr_db"] > 5
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("strategy", ["mcmc", "default"])
+def test_degree_2_train_save_resume_and_seed(tmp_path, strategy):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=MOTION_TIMES)
+    strat = {"name": strategy, "refine_start": 10, "refine_every": 10, "refine_stop": 1000}
+    if strategy == "mcmc":
+        strat.update(cap_max=600, grow_rate=1.5)
+    deg2 = {"name": "spacetime", "motion_degree": 2}
+    base = {"source_path": ds, "iterations": 40, "sh_degree": 1, "sh_degree_interval": 20,
+            "cameras_per_step": 2, "strategy": strat, "test_iterations": [40],
+            "save_iterations": [40], "checkpoint_iterations": [20, 40], "log_every": 5}
+
+    # a degree-2 run trains the term and writes it
+    out = str(tmp_path / "deg2")
+    Trainer(build_config({**base, "model_path": out, "representation": deg2}),
+            log=lambda m: None).run()
+    ply_path = os.path.join(out, "splat_4d.ply")
+    header, fields = core_ply.read_sogst_ply(ply_path)
+    assert header["motion_degree"] == 2
+    assert np.any(np.stack([fields["ax"], fields["ay"], fields["az"]]) != 0)
+
+    # resume across densification keeps every row aligned, Adam state included
+    cfg = build_config({**base, "model_path": str(tmp_path / "resumed"), "representation": deg2})
+    tr = Trainer(cfg, resume=os.path.join(out, "ckpt_20.pt"), log=lambda m: None)
+    assert tr.start_step == 21 and "accelerations" in tr.rep.params
+    tr.run()
+    assert tr.rep.params["accelerations"].shape == tr.rep.params["means"].shape
+
+    # resume or seed at degree 1 refuses rather than dropping the term
+    deg1 = build_config({**base, "model_path": str(tmp_path / "refused")})
+    with pytest.raises(ValueError, match="motion_degree"):
+        Trainer(deg1, resume=os.path.join(out, "ckpt_20.pt"), log=lambda m: None)
+    with pytest.raises(ValueError, match="motion_degree"):
+        Trainer({**deg1, "init_ply": ply_path}, log=lambda m: None)
+
+    # seed a degree-2 run from its own PLY
+    seeded = build_config({**base, "model_path": str(tmp_path / "seeded"), "representation": deg2,
+                           "init_ply": ply_path, "iterations": 5, "test_iterations": [5],
+                           "save_iterations": [5], "checkpoint_iterations": []})
+    tr = Trainer(seeded, log=lambda m: None)
+    assert tr.rep.num_gaussians == header["count"]
+    tr.run()
+
+
+@pytest.mark.gpu
+def test_degree_1_checkpoint_continues_at_degree_2(tmp_path):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=MOTION_TIMES)
+    base = {"source_path": ds, "iterations": 20, "sh_degree": 1, "sh_degree_interval": 20,
+            "cameras_per_step": 2, "test_iterations": [20], "save_iterations": [20],
+            "checkpoint_iterations": [10], "log_every": 5,
+            "strategy": {"name": "mcmc", "cap_max": 600, "refine_start": 5, "refine_every": 5}}
+    out = str(tmp_path / "deg1")
+    Trainer(build_config({**base, "model_path": out}), log=lambda m: None).run()
+    _, plain = core_ply.read_sogst_ply(os.path.join(out, "splat_4d.ply"))
+    assert "ax" not in plain
+
+    out2 = str(tmp_path / "deg2")
+    cfg = build_config({**base, "model_path": out2,
+                        "representation": {"name": "spacetime", "motion_degree": 2}})
+    tr = Trainer(cfg, resume=os.path.join(out, "ckpt_10.pt"), log=lambda m: None)
+    assert torch.all(tr.rep.params["accelerations"] == 0)
+    tr.run()
+    header, fields = core_ply.read_sogst_ply(os.path.join(out2, "splat_4d.ply"))
+    assert header["motion_degree"] == 2 and np.any(fields["ax"] != 0)

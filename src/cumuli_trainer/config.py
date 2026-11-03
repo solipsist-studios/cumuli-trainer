@@ -76,8 +76,10 @@ DEFAULT_LR = {
     # Temporal parameters. Time is normalised to [0, 1] over time_duration
     # inside the trainer, so these do not depend on clip length. velocities
     # are scene units per normalised time, multiplied by the scene scale and
-    # decayed like means. See README for how they were chosen.
+    # decayed like means. accelerations (motion_degree 2 only) are the same
+    # per normalised time squared. See README for how they were chosen.
     "velocities": 1.6e-4,
+    "accelerations": 1.6e-4,
     "t_centers": 1e-3,
     "t_log_sigmas": 5e-3,
 }

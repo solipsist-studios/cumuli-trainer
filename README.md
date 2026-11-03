@@ -159,10 +159,26 @@ temporal ones follow: a clone or relocated copy inherits its source's motion
 and window, and both halves of a split keep the parent's motion and window
 (the split offset is applied at `t_center`, where `means` lives).
 
+Motion is linear by default. `representation: {name: spacetime, motion_degree: 2}`
+adds a trained `accelerations` tensor, so `mean(t) = xyz + v*dt + a*dt*dt`, and
+writes `ax, ay, az` to the PLY. `a` is the raw `dt^2` coefficient, not
+half-acceleration (cumuli `docs/sogst-format.md` section 1). If every coefficient
+is exactly zero at export, the columns are left out and a warning is issued,
+because the spec does not allow emitting zeros as accel (section 4.8).
+
+A degree-1 checkpoint or `init_ply` can continue at degree 2, starting from zero
+acceleration. A degree-2 one refuses to load at degree 1, because dropping the
+term would change the motion.
+
+Motion only trains on Gaussians drawn away from their `t_center`, since the
+gradient of `v*dt` and `a*dt*dt` is zero at `dt = 0`. On a two-frame clip the
+initial window fades each Gaussian below gsplat's 1/255 cull at the other frame,
+so velocity and acceleration stay at zero at the default `t_init_div`.
+
 Initialisation: positions, colours and times from `points3d.ply`; spatial
 scale from the mean distance to the 3 nearest neighbours, computed within
 each timestamp so repeated copies of a static region do not shrink each
-other; velocity 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
+other; velocity and acceleration 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
 `t_init_div` 100; peak opacity 0.1.
 
 ## Strategies
@@ -187,6 +203,7 @@ accumulate densely, without index lists, so there is no per-step sync.
 | sh0 | 2.5e-3 | |
 | shN | 1.25e-4 | sh0 / 20 |
 | velocities | 1.6e-4 x scene scale | units per normalised time; decays like means |
+| accelerations | 1.6e-4 x scene scale | motion_degree 2 only; units per normalised time squared; decays like means |
 | t_centers | 1e-3 | normalised time |
 | t_log_sigmas | 5e-3 | |
 
@@ -196,6 +213,8 @@ rig centre. The temporal values were chosen here. Velocity uses the position
 LR: a velocity step moves a Gaussian by (step x dt), and dt within its window
 is about one sigma (0.15 normalised at the default init), so a velocity step
 is a fraction of a position step and motion cannot outrun position.
+Acceleration starts from the same LR by the same argument: a step moves a
+Gaussian by (step x dt^2), a smaller fraction still.
 `t_centers` at 1e-3 moves a window by about a hundredth of a frame per step
 on a 12-frame clip. `t_log_sigmas` uses the scale LR because both are
 log-space widths.

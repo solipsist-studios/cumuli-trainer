@@ -94,6 +94,34 @@ def test_ops_keep_temporal_rows_and_optimizer_state_aligned():
         assert opts[k].state[p]["exp_avg_sq"].shape == p.shape
 
 
+def test_ops_keep_acceleration_rows_and_optimizer_state_aligned():
+    params, _ = make_params()
+    n = params["means"].shape[0]
+    params["accelerations"] = torch.nn.Parameter(
+        torch.arange(n, dtype=torch.float32)[:, None].repeat(1, 3) + 100.0)
+    opts = {k: torch.optim.Adam([v], lr=1e-3) for k, v in params.items()}
+    sum((v ** 2).sum() for v in params.values()).backward()
+    for o in opts.values():
+        o.step()
+    before = params["accelerations"].detach().clone()
+
+    ops.duplicate(params, opts, torch.tensor([False, True, False, False, True, False]))
+    assert torch.equal(params["accelerations"][6:], before[[1, 4]])
+    st = opts["accelerations"].state[params["accelerations"]]
+    assert st["exp_avg"].shape == (8, 3) and torch.all(st["exp_avg"][6:] == 0)
+
+    mask = torch.zeros(8, dtype=torch.bool)
+    mask[0] = True
+    ops.split(params, opts, mask)
+    assert torch.equal(params["accelerations"][-2:], before[[0, 0]])
+
+    ops.remove(params, opts, torch.arange(9) < 3)
+    assert params["accelerations"].shape == (6, 3)
+    st = opts["accelerations"].state[params["accelerations"]]
+    assert st["exp_avg_sq"].shape == (6, 3)
+    assert opts["accelerations"].param_groups[0]["params"][0] is params["accelerations"]
+
+
 def test_opacity_reset_clamps_and_clears():
     params, opts = make_params()
     with torch.no_grad():

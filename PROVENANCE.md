@@ -43,6 +43,19 @@ OMG4 baseline only its outputs were used: the run's `gs4d_config.yaml`
 splat count in `meta.json`, and file modification times for its training
 duration.
 
+## Degree-2 motion
+
+Pending legal review. The change was written from `docs/sogst-format.md`
+sections 1, 4.8 and 7, the cumuli-core API and the existing `velocities` code
+in this repository.
+
+Also read while planning it, to check compatibility, in the Solipsist forks:
+the accel handling in supersplat-viewer `src/core/sogst-motion.ts` and related
+`sogst-*` files; the accel handling in splat-transform
+`src/lib/writers/write-sogst.ts` and `src/lib/data-table/transform.ts`; and the
+message and file list, not the diff, of supersplat-viewer commit `b2d8caa`
+("omg4: degree-2 motion (accel) playback support"). No code was taken from them.
+
 ## Modules
 
 | module | written from |
@@ -51,7 +64,7 @@ duration.
 | `config.py` | Solipsist spec (key names shared with the ComfyUI pack and the cumuli orchestrator). Default LRs from the 3DGS paper section 7.1 and gsplat `simple_trainer.py` defaults. Temporal LRs chosen here; see README. |
 | `core.py`, `_shims/*` | The agreed cumuli-core API. `_shims/ply.py` from cumuli `docs/sogst-format.md` section 7; `_shims/cameras.py`, `_shims/metrics.py` from cumuli `scripts/eval_render.py` conventions; `_shims/spacetime.py` from `docs/sogst-format.md` section 1; `_shims/render.py` from the gsplat `rasterization` API. Only used when cumuli-core is missing. |
 | `representations/base.py` | Solipsist spec. |
-| `representations/spacetime.py` | Temporal model from `docs/sogst-format.md` section 1 (linear motion and temporal radial-basis opacity, after Li et al. CVPR 2024 section 3). Initialisation per the Solipsist brief (k-NN scale as in the 3DGS paper section 5.1, using scipy `cKDTree`; `t_sigma = sqrt(duration / t_init_div)`). SH DC from RGB with the standard band-0 constant. |
+| `representations/spacetime.py` | Temporal model from `docs/sogst-format.md` section 1 (polynomial motion of degree 1 or 2 and temporal radial-basis opacity, after Li et al. CVPR 2024 section 3). Degree-2 motion from `docs/sogst-format.md` sections 1, 4.8 and 7 and the cumuli-core `slice_at(accel=)` and PLY API; see "Degree-2 motion" below. Initialisation per the Solipsist brief (k-NN scale as in the 3DGS paper section 5.1, using scipy `cKDTree`; `t_sigma = sqrt(duration / t_init_div)`). SH DC from RGB with the standard band-0 constant. |
 | `strategies/base.py` | Solipsist spec. |
 | `strategies/ops.py` | Clone, split (scale / 1.6) and prune from the 3DGS paper section 5.2; relocation and growth from Kheradmand et al. section 4 (equation 9 via gsplat's `compute_relocation`) and the noise of equation 8. Interface conventions (one Adam per parameter, moments edited alongside rows) follow gsplat's strategy ops, read but not copied. |
 | `strategies/mcmc.py` | Kheradmand et al. 2024; parameter names and defaults follow gsplat `MCMCStrategy`. Scene-bounds recycling is new. |
