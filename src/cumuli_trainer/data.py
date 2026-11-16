@@ -36,8 +36,25 @@ from .core import render as core_render
 # memory stays free beside them. Heidi (610 views at 2656x2324, 14.03 GiB
 # of images) peaked at 16.2 GiB with a 300k cap and 16.7 GiB with 1M, so
 # training needs ~3 GiB on top. Host-resident images cost 4x the time
-# there (20.5 vs 4.8 min) because every step waits on the copy.
-GPU_HEADROOM_BYTES = 8 * 2**30
+# there (20.5 vs 4.8 min) because every step waits on the copy. A 260k-splat
+# fine-tune at 2048x1792 peaked at 2.7 GiB, so 4 GiB covers the 1M cap too.
+GPU_HEADROOM_BYTES = 4 * 2**30
+# Host-resident images are pinned and the process holds ~1.7x their size, so
+# "auto" refuses to start when that would leave the machine less than this.
+# Without the check a 23.6 GiB set filled 60 GB of RAM and froze the box.
+HOST_HEADROOM_BYTES = 6 * 2**30
+HOST_OVERHEAD = 1.7
+
+
+def _host_available_bytes():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
 
 
 def _load_uint8(dataset, cam) -> np.ndarray:
@@ -102,6 +119,13 @@ class TrainData:
                 free, _ = torch.cuda.mem_get_info(device)
                 if free - nbytes >= GPU_HEADROOM_BYTES:
                     where = "cuda"
+            if where == "cpu":
+                avail = _host_available_bytes()
+                if avail is not None and nbytes * HOST_OVERHEAD > avail - HOST_HEADROOM_BYTES:
+                    raise MemoryError(
+                        f"{n} training views need {nbytes / 2**30:.1f} GiB of images and neither the GPU nor the "
+                        f"{avail / 2**30:.1f} GiB of free RAM can hold them safely; use fewer cameras or frames, "
+                        "or a smaller image size")
         log(f"Loading Training Cameras: {n} views at {self.width}x{self.height}, "
             f"{nbytes / 2**30:.2f} GiB as uint8 on {where}")
         store = torch.empty((n, self.height, self.width, 4), dtype=torch.uint8,
