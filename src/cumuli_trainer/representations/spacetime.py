@@ -267,7 +267,8 @@ class SpacetimeRepresentation(Representation):
 
     def slice(self, t: float, sh_degree: int) -> SlicedGaussians:
         p = self.params
-        tau = self.to_tau(float(t))
+        # A tensor time stays a tensor, so learned capture-time corrections get a gradient.
+        tau = self.to_tau(t if torch.is_tensor(t) else float(t))
         means, alpha = core_spacetime.slice_at(
             p["means"], p["velocities"], p["opacities"], p["t_centers"], self._sigmas(), tau,
             accel=p.get("accelerations"))

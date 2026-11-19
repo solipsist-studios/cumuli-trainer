@@ -288,3 +288,66 @@ def test_train_with_sub_frame_offsets(tmp_path, strategy):
     assert summary["tests"][-1]["psnr_db"] > 10
     if strategy == "default":
         assert summary["num_gaussians"] != 400  # the batched layout still feeds densification
+
+
+@pytest.mark.gpu
+def test_learned_time_offsets_recover_how_late_each_camera_fired(tmp_path):
+    """Photos of a moving scene taken at time + true offset per camera; a model that already
+    fits the scene, everything but the corrections frozen: the learned corrections come out
+    as the true offsets (zero-meaned, since a shift of every camera is not observable)."""
+    from PIL import Image
+
+    from cumuli_trainer.trainer import Trainer
+
+    true = torch.tensor([0.0, 0.02, -0.03, 0.01])
+    ds = str(tmp_path / "ds")
+    make_dataset(ds)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "gt"), "iterations": 400, "sh_degree": 0,
+                        "cameras_per_step": 2, "strategy": {"name": "default", "refine_stop": 0},
+                        "losses": {"opacity_mask": 0, "aniso_reg": 0},
+                        "test_iterations": [], "save_iterations": [], "checkpoint_iterations": []})
+    scene = Trainer(cfg, log=lambda m: None)
+    with torch.no_grad():
+        g = torch.Generator(device="cuda").manual_seed(1)
+        scene.rep.params["velocities"].copy_(torch.randn(scene.rep.params["velocities"].shape, generator=g, device="cuda") * 3)
+        scene.rep.params["opacities"].fill_(3.0)
+        scene.rep.params["t_log_sigmas"].fill_(3.0)  # visible all the time: only motion carries timing
+        scene.rep.params["sh0"].copy_(torch.rand(scene.rep.params["sh0"].shape, generator=g, device="cuda") * 2 - 1)
+        for i, cam in enumerate(scene.data.cams):
+            sl = scene.rep.slice(cam.time + float(true[int(cam.label)]), 0)
+            rgb, alpha, _ = scene.renderer.render(sl, scene.data.viewmats[i:i + 1], scene.data.Ks[i:i + 1],
+                                                  scene.data.width, scene.data.height)
+            a = alpha[0].clamp(1e-6, 1)
+            rgba = torch.cat([(rgb[0] / a).clamp(0, 1), alpha[0]], dim=-1)
+            Image.fromarray((rgba.cpu().numpy() * 255).round().astype(np.uint8)).save(cam.image_path + ".png")
+
+    cfg2 = build_config({**{k: v for k, v in cfg.items() if k not in ("time_offsets",)},
+                         "model_path": str(tmp_path / "learn"),
+                         "time_offsets": {"learn": True, "warmup": 0, "lr": 2e-3, "reg": 0.0, "clamp_frames": 0.6}})
+    tr = Trainer(cfg2, log=lambda m: None)
+    with torch.no_grad():
+        for k, p in tr.rep.params.items():
+            p.copy_(scene.rep.params[k])
+    for opt in tr.optimizers.values():
+        for group in opt.param_groups:
+            group["lr"] = 0.0
+    tr.lr_init = {k: 0.0 for k in tr.lr_init}
+    for step in range(1, 401):
+        tr.train_step(step)
+    learned = torch.tensor([tr.time_offsets.seconds()[str(i)] for i in range(4)])
+    want = true - true.mean()
+    assert torch.allclose(learned, want, atol=0.004), (learned, want)
+    assert tr.time_offsets.seconds() == pytest.approx({str(i): float(v) for i, v in enumerate(learned)})
+
+
+def test_time_offsets_config_is_off_by_default_and_checked():
+    from cumuli_trainer.config import ConfigError
+
+    base = {"source_path": "/d", "model_path": "/m"}
+    assert build_config(base)["time_offsets"] == {"learn": False, "warmup": 8000, "lr": 1e-4, "reg": 0.01,
+                                                  "clamp_frames": 0.5}
+    assert build_config({**base, "time_offsets": True})["time_offsets"]["learn"] is True
+    with pytest.raises(ConfigError, match="unknown time_offsets"):
+        build_config({**base, "time_offsets": {"lern": True}})
+    with pytest.raises(ConfigError):
+        build_config({**base, "time_offsets": {"clamp_frames": 0}})

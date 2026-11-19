@@ -122,6 +122,8 @@ DEFAULTS: dict[str, Any] = {
     # 51% of them, 86% of the off-palette opaque ones, and moved held-out
     # cam05 from 36.07 to 36.12 dB (LPIPS 0.0096 both).
     "export_min_contribution": 2.0,
+    # Learned per-camera capture-time corrections (time_offsets.py); off unless "learn" is true.
+    "time_offsets": None,
 }
 
 # Sections whose contents belong to a plugin and are validated by it.
@@ -254,6 +256,8 @@ def validate(cfg: dict) -> None:
     cfg["cameras_per_step"] = int(cfg["cameras_per_step"])
     if cfg["cameras_per_step"] < 1:
         raise ConfigError("cameras_per_step must be at least 1")
+    from .time_offsets import validate as validate_time_offsets
+    cfg["time_offsets"] = validate_time_offsets(cfg["time_offsets"])
     bg = cfg["background"]
     if isinstance(bg, (list, tuple)):
         if len(bg) != 3:
