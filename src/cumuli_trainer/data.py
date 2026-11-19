@@ -83,14 +83,26 @@ def foreground_box(alpha: np.ndarray, margin: int) -> Tuple[int, int, int, int]:
             max(0, cols[0] - margin), min(w, cols[-1] + 1 + margin))
 
 
+def capture_time(cam) -> float:
+    """When the camera took this view's picture, in seconds: the nominal time plus
+    its sub-frame offset (cumuli_core Camera.capture_time; older cumuli_core has
+    no offsets, so the nominal time)."""
+    return float(getattr(cam, "capture_time", cam.time))
+
+
 @dataclass
 class Batch:
-    time: float  # seconds
+    time: float  # seconds, the instant's nominal time (shared by every view)
     index: torch.Tensor  # [C] camera indices on the device
     images: torch.Tensor  # [C, H, W, 4] uint8 on the device
     crop_size: Tuple[int, int]  # (h, w) shared by every view
     crop_origins: List[Tuple[int, int]]  # per view (y0, x0)
     weights: Optional[torch.Tensor] = None  # [C] loss_weight per view, None when all are 1
+    times: List[float] = None  # per view, seconds: when that camera took its picture
+
+    def __post_init__(self):
+        if self.times is None:
+            self.times = [self.time] * int(self.index.shape[0])
 
 
 class TrainData:
@@ -194,20 +206,21 @@ class TrainData:
         self._epoch = []
         for b, (t, chunk) in enumerate(batches):
             size, origins = self._crop(chunk)
-            self._epoch.append((t, idx_dev[b, :len(chunk)], idx_img[b, :len(chunk)], size, origins))
+            times = [capture_time(self.cams[i]) for i in chunk]
+            self._epoch.append((t, idx_dev[b, :len(chunk)], idx_img[b, :len(chunk)], size, origins, times))
         self._pos = 0
 
     def next(self) -> Batch:
         if self._pos >= len(self._epoch):
             self._new_epoch()
-        t, idx, idx_img, size, origins = self._epoch[self._pos]
+        t, idx, idx_img, size, origins, times = self._epoch[self._pos]
         self._pos += 1
         imgs = self.images[idx_img]
         if not self.on_device:
             imgs = imgs.to(self.device, non_blocking=True)
         weights = self.view_weights[idx] if self.weighted else None
         return Batch(time=t, index=idx, images=imgs, crop_size=size, crop_origins=origins,
-                     weights=weights)
+                     weights=weights, times=times)
 
     def state_dict(self) -> dict:
         return {"rng": self.rng.getstate()}

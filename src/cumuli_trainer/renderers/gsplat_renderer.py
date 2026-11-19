@@ -32,3 +32,15 @@ class GsplatRenderer(Renderer):
             int(width), int(height), g.sh_degree, render_mode="RGB",
             absgrad=self.absgrad, **self.kw)
         return rgb, alpha, info
+
+    def render_each(self, gs, viewmats, Ks, width, height):
+        import torch
+
+        first = gs[0]
+        stack = lambda name: torch.stack([getattr(g, name) for g in gs])  # noqa: E731
+        rgb, alpha, info = core_render.render(
+            stack("means"), stack("quats"), stack("scales"), stack("opacities"), stack("colors"),
+            (viewmats[:, None], Ks[:, None]), int(width), int(height), first.sh_degree,
+            render_mode="RGB", absgrad=self.absgrad, **self.kw)
+        info["n_cameras"] = int(info.get("n_batches", len(gs))) * int(info.get("n_cameras", 1))
+        return rgb[:, 0], alpha[:, 0], info

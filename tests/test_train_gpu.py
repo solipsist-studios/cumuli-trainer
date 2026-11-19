@@ -33,7 +33,7 @@ def _look_at_c2w_gl(eye, target=(0, 0, 0)):
 MOTION_TIMES = (0.0, 0.05, 0.1)
 
 
-def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
+def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None):
     from PIL import Image
     os.makedirs(root, exist_ok=True)
     frames, test = [], []
@@ -47,9 +47,12 @@ def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
                 img = np.zeros((h, w, 4), np.uint8)
                 img[h // 4: 3 * h // 4, w // 3: 2 * w // 3] = (200, min(80 + 100 * ti, 255), 40, 255)
                 Image.fromarray(img).save(os.path.join(root, rel + ".png"))
-                out.append({"file_path": rel, "time": t, "fl_x": 60.0, "fl_y": 60.0,
-                            "cx": w / 2, "cy": h / 2, "w": w, "h": h,
-                            "camera_label": f"{ci}", "transform_matrix": c2w.tolist()})
+                row = {"file_path": rel, "time": t, "fl_x": 60.0, "fl_y": 60.0,
+                       "cx": w / 2, "cy": h / 2, "w": w, "h": h,
+                       "camera_label": f"{ci}", "transform_matrix": c2w.tolist()}
+                if offsets and split == "train":
+                    row["time_offset"] = offsets[ci]
+                out.append(row)
     for name, fr in (("transforms_train.json", frames), ("transforms_test.json", test)):
         with open(os.path.join(root, name), "w") as fp:
             json.dump({"camera_model": "OPENCV", "frames": fr}, fp)
@@ -231,3 +234,57 @@ def test_degree_1_checkpoint_continues_at_degree_2(tmp_path):
     tr.run()
     header, fields = core_ply.read_sogst_ply(os.path.join(out2, "splat_4d.ply"))
     assert header["motion_degree"] == 2 and np.any(fields["ax"] != 0)
+
+
+OFFSETS = (0.0, 0.004, -0.006, 0.008)  # seconds, under half a frame at 60 fps
+
+
+@pytest.mark.gpu
+def test_views_render_at_their_own_capture_time(tmp_path):
+    """A batch of one instant whose cameras fired at different times renders each
+    view from the Gaussians sliced at that camera's time: the same pixels as
+    rendering the views one by one."""
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, offsets=OFFSETS)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 1,
+                        "sh_degree": 0, "cameras_per_step": 4, "test_iterations": [],
+                        "save_iterations": [], "checkpoint_iterations": []})
+    tr = Trainer(cfg, log=lambda m: None)
+    with torch.no_grad():
+        tr.rep.params["velocities"].normal_(std=2.0)  # motion, so time matters
+    batch = tr.data.next()
+    assert len(set(batch.times)) == 4
+    assert {round(t - batch.time, 6) for t in batch.times} == {round(o, 6) for o in OFFSETS}
+    with torch.no_grad():
+        rgb, alpha, info, _ = tr.render_batch(batch, 0)
+        assert info["n_cameras"] == 4
+        for c, t in enumerate(batch.times):
+            g = tr.rep.slice(t, 0)
+            one, a1, _ = tr.renderer.render(g, tr.data.viewmats[batch.index[c:c + 1]],
+                                            tr.data.Ks[batch.index[c:c + 1]], tr.data.width, tr.data.height)
+            assert torch.allclose(rgb[c], one[0], atol=1e-5)
+            assert torch.allclose(alpha[c], a1[0], atol=1e-5)
+        # rendering everything at the nominal time instead gives different pictures
+        g = tr.rep.slice(batch.time, 0)
+        nominal, _, _ = tr.renderer.render(g, tr.data.viewmats[batch.index], tr.data.Ks[batch.index],
+                                           tr.data.width, tr.data.height)
+        assert not torch.allclose(rgb[1:], nominal[1:], atol=1e-4)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("strategy", ["mcmc", "default"])
+def test_train_with_sub_frame_offsets(tmp_path, strategy):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, offsets=OFFSETS)
+    strat = {"name": strategy, "refine_start": 10, "refine_every": 10, "refine_stop": 1000}
+    if strategy == "mcmc":
+        strat.update(cap_max=600, grow_rate=1.5)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 40,
+                        "sh_degree": 0, "cameras_per_step": 2, "strategy": strat,
+                        "test_iterations": [40], "save_iterations": [40], "checkpoint_iterations": []})
+    summary = Trainer(cfg, log=lambda m: None).run()
+    assert summary["tests"][-1]["psnr_db"] > 10
+    if strategy == "default":
+        assert summary["num_gaussians"] != 400  # the batched layout still feeds densification

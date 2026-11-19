@@ -28,3 +28,11 @@ class Renderer:
 
     def render(self, gaussians, viewmats, Ks, width, height):
         raise NotImplementedError
+
+    def render_each(self, gaussians_per_view, viewmats, Ks, width, height):
+        """Render view c from its own sliced Gaussians ``gaussians_per_view[c]``
+        (cameras of one instant that took their pictures at slightly different
+        times).  Returns rgb [C, H, W, 3], alpha [C, H, W, 1] and an info whose
+        per-view tensors carry an extra batch dimension ([C, 1, N, ...]);
+        ``n_cameras`` counts every view."""
+        raise NotImplementedError(f"{type(self).__name__} cannot render views at different times")

@@ -17,7 +17,7 @@ import torch
 
 from .core import metrics as core_metrics
 from .core import render as core_render
-from .data import _load_uint8
+from .data import _load_uint8, capture_time
 
 
 class EvalSet:
@@ -39,7 +39,7 @@ class EvalSet:
         rows = []
         lp = self.lpips()
         for i, cam in enumerate(self.cams):
-            g = representation.slice(cam.time, sh_degree)
+            g = representation.slice(capture_time(cam), sh_degree)
             rgb, alpha, _ = renderer.render(g, self.viewmats[i:i + 1], self.Ks[i:i + 1],
                                             cam.width, cam.height)
             img = (rgb[0] + (1.0 - alpha[0]) * self.bg).clamp(0.0, 1.0)
@@ -47,7 +47,7 @@ class EvalSet:
             a = gt[..., 3:4]
             gt = gt[..., :3] * a + (1.0 - a) * self.bg
             rows.append({
-                "name": cam.name, "time": float(cam.time),
+                "name": cam.name, "time": float(cam.time), "capture_time": capture_time(cam),
                 "psnr_db": float(core_metrics.psnr(img, gt)),
                 "ssim": float(core_metrics.ssim(img, gt)),
                 "lpips": float(lp(img, gt)),

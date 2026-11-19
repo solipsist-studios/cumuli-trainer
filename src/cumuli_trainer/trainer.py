@@ -39,7 +39,7 @@ from .config import dump, fps_from_times, loss_specs
 from .core import CORE_VERSION
 from .core import dataset as core_dataset
 from .core import ply as core_ply
-from .data import TrainData
+from .data import TrainData, capture_time
 from .evaluate import EvalSet
 from .losses.base import LossInputs
 from .representations.base import RepresentationContext
@@ -218,6 +218,26 @@ class Trainer:
         return min(self.cfg["sh_degree"], step // max(1, int(self.cfg["sh_degree_interval"])))
 
     # ------------------------------------------------------------------
+    def render_batch(self, batch, sh_degree: int):
+        """Render a batch's views, each at the time its camera took the picture.
+        When every view has the same time (a genlocked rig, or no sub-frame
+        timing in the dataset) this is one slice and one render, as before.
+        Returns (rgb, alpha, info, the first view's sliced Gaussians)."""
+        vm, ks = self.data.viewmats[batch.index], self.data.Ks[batch.index]
+        w, h = self.data.width, self.data.height
+        times = list(batch.times)
+        if len(set(times)) <= 1:
+            g = self.rep.slice(times[0] if times else batch.time, sh_degree)
+            rgb, alpha, info = self.renderer.render(g, vm, ks, w, h)
+            return rgb, alpha, info, g
+        sliced = {}
+        for t in times:
+            if t not in sliced:
+                sliced[t] = self.rep.slice(t, sh_degree)
+        gs = [sliced[t] for t in times]
+        rgb, alpha, info = self.renderer.render_each(gs, vm, ks, w, h)
+        return rgb, alpha, info, gs[0]
+
     def train_step(self, step: int):
         cfg = self.cfg
         for name in self.decayed:
@@ -226,9 +246,7 @@ class Trainer:
 
         batch = self.data.next()
         idx, imgs = batch.index, batch.images
-        g = self.rep.slice(batch.time, self.sh_degree_at(step))
-        rgb, alpha, info = self.renderer.render(
-            g, self.data.viewmats[idx], self.data.Ks[idx], self.data.width, self.data.height)
+        rgb, alpha, info, g = self.render_batch(batch, self.sh_degree_at(step))
         gt = imgs.float().div_(255.0)
         gt_alpha = gt[..., 3:4]
         gt_rgb = gt[..., :3] * gt_alpha
@@ -285,12 +303,13 @@ class Trainer:
         sliced = {}
         with torch.enable_grad():
             for i, cam in enumerate(self.data.cams):
-                if cam.time not in sliced:
+                t = capture_time(cam)
+                if t not in sliced:
                     sliced.clear()
-                    g = self.rep.slice(cam.time, 0)
-                    sliced[cam.time] = (g.means.detach(), g.quats.detach(),
-                                        g.scales.detach(), g.opacities.detach())
-                means, quats, scales, opac = sliced[cam.time]
+                    g = self.rep.slice(t, 0)
+                    sliced[t] = (g.means.detach(), g.quats.detach(),
+                                 g.scales.detach(), g.opacities.detach())
+                means, quats, scales, opac = sliced[t]
                 best = torch.maximum(best, view_contribution(
                     means, quats, scales, opac, self.data.viewmats[i:i + 1],
                     self.data.Ks[i:i + 1], self.data.width, self.data.height))
