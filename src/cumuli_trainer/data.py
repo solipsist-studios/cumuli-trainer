@@ -196,16 +196,23 @@ class TrainData:
         cps = self.cameras_per_step
         batches = []
         for t, members in zip(self.times, self.groups):
-            m = list(members)
-            self.rng.shuffle(m)
-            for k in range(0, len(m), cps):
-                chunk = m[k:k + cps]
-                if len(chunk) < cps and len(m) >= cps:
-                    # top up a short tail from the same instant so every
-                    # batch has the same camera count (same cost per step)
-                    pool = [x for x in m if x not in chunk]
-                    chunk = chunk + self.rng.sample(pool, cps - len(chunk))
-                batches.append((t, chunk))
+            # An instant with visit_weight w is dealt w times per epoch (the fraction by chance), so fast frames
+            # (frame_motion.py) get more of the training. Weight 1 draws nothing extra: unweighted runs are unchanged.
+            w = max(float(getattr(self.cams[i], "visit_weight", 1.0)) for i in members)
+            repeats = int(w)
+            if w - repeats > 0 and self.rng.random() < w - repeats:
+                repeats += 1
+            for _ in range(max(repeats, 1)):
+                m = list(members)
+                self.rng.shuffle(m)
+                for k in range(0, len(m), cps):
+                    chunk = m[k:k + cps]
+                    if len(chunk) < cps and len(m) >= cps:
+                        # top up a short tail from the same instant so every
+                        # batch has the same camera count (same cost per step)
+                        pool = [x for x in m if x not in chunk]
+                        chunk = chunk + self.rng.sample(pool, cps - len(chunk))
+                    batches.append((t, chunk))
         self.rng.shuffle(batches)
         width = max(len(c) for _, c in batches)
         idx = torch.tensor([c + [c[-1]] * (width - len(c)) for _, c in batches], dtype=torch.long)

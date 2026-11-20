@@ -33,7 +33,8 @@ def _look_at_c2w_gl(eye, target=(0, 0, 0)):
 MOTION_TIMES = (0.0, 0.05, 0.1)
 
 
-def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None, readout=None, raw_camera=None):
+def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None, readout=None, raw_camera=None,
+                 weights=None):
     from PIL import Image
     os.makedirs(root, exist_ok=True)
     frames, test = [], []
@@ -56,6 +57,8 @@ def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None, rea
                     row["readout_s"] = readout
                 if raw_camera is not None:
                     row["raw_camera"] = raw_camera
+                if weights and split == "train" and ti in weights:
+                    row["visit_weight"] = weights[ti]
                 out.append(row)
     for name, fr in (("transforms_train.json", frames), ("transforms_test.json", test)):
         with open(os.path.join(root, name), "w") as fp:
@@ -355,3 +358,26 @@ def test_time_offsets_config_is_off_by_default_and_checked():
         build_config({**base, "time_offsets": {"lern": True}})
     with pytest.raises(ConfigError):
         build_config({**base, "time_offsets": {"clamp_frames": 0}})
+
+
+@pytest.mark.gpu
+def test_a_weighted_instant_is_visited_that_many_times_as_often(tmp_path):
+    """visit_weight w on an instant's views deals it w times per epoch (fractions by chance)."""
+    from collections import Counter
+
+    from cumuli_trainer.core import dataset as core_dataset
+    from cumuli_trainer.data import TrainData
+
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=(0.0, 0.1, 0.2), weights={1: 3.0, 2: 1.5})
+    d = core_dataset.Dataset4D(ds)
+    data = TrainData(d, d.train_cameras, torch.device("cuda"), 2, seed=0, log=lambda m: None)
+    counts = Counter()
+    epochs = 200
+    for _ in range(epochs):
+        data._new_epoch()
+        counts.update(round(e[0], 3) for e in data._epoch)
+    per_epoch = {t: n / epochs for t, n in counts.items()}
+    assert per_epoch[0.0] == 2.0  # 4 cameras, 2 per step: one pass is 2 batches
+    assert per_epoch[0.1] == 6.0  # weight 3: three passes
+    assert 2.6 < per_epoch[0.2] < 3.4  # weight 1.5: two passes half the time
