@@ -97,6 +97,19 @@ window is still charged by L1 and the opacity-mask term. On the 12-camera
 parity set this cut the step cost from 24 ms to 5 ms per view.
 `losses: {ssim: {weight: 0.2, crop: false}}` turns it off.
 
+A view can count for less. A `transforms_train.json` entry may carry
+`loss_weight` (default 1, at least 0), which a dataset uses to mark views it
+trusts less, such as generated views mixed in with real captures. The `l1`
+and `ssim` terms multiply each view's loss by its weight before averaging
+over the step's cameras, without renormalising, so a view at 0.5 adds half
+the gradient it would add alone and a view at 0 adds none. The silhouette
+term (`opacity_mask`) and the regularisers ignore it: they describe the
+geometry, not how far the view's pixels can be trusted. Weights are read at
+load time, logged when any differ from 1, and a dataset with none trains
+exactly as before. Reading the field needs a cumuli-core newer than v0.1.0
+(`Camera.loss_weight`); with v0.1.0 the trainer stops at load with an error
+rather than train every view at full weight.
+
 Time is normalised to [0, 1] over `time_duration` inside the trainer, so
 learning rates do not depend on clip length. The PLY is written in seconds.
 

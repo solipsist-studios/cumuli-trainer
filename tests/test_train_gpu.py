@@ -128,3 +128,29 @@ def test_view_contribution_is_near_zero_for_a_hidden_gaussian():
     # gsplat caps alpha at 0.99, so 1% leaks through: far below the 2 px cut
     assert contrib[1] < 0.02 * alone[0]
     assert contrib[1] < 0.5
+
+
+@pytest.mark.gpu
+def test_train_with_per_view_loss_weights(tmp_path):
+    """A dataset with loss_weight on its views trains to the end, reports the
+    weights, and a zero-weight view still takes part (silhouette term)."""
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds)
+    path = os.path.join(ds, "transforms_train.json")
+    with open(path) as fp:
+        t = json.load(fp)
+    for i, frame in enumerate(t["frames"]):
+        frame["loss_weight"] = [1.0, 0.5, 0.0, 1.0][i % 4]
+    with open(path, "w") as fp:
+        json.dump(t, fp)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 30,
+                        "sh_degree": 1, "sh_degree_interval": 20, "cameras_per_step": 2,
+                        "strategy": {"name": "default", "refine_start": 10, "refine_every": 10,
+                                     "refine_stop": 1000},
+                        "test_iterations": [30], "save_iterations": [30],
+                        "checkpoint_iterations": [], "log_every": 5})
+    lines = []
+    summary = Trainer(cfg, log=lines.append).run()
+    assert any("per-view loss weights: 4 of 8 views differ from 1" in m for m in lines)
+    assert math.isfinite(summary["tests"][-1]["psnr_db"]) and summary["tests"][-1]["psnr_db"] > 5

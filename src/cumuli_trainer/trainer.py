@@ -243,7 +243,8 @@ class Trainer:
         self.strategy.step_pre_backward(self.rep.params, self.optimizers, step, info)
         inputs = LossInputs(pred_rgb=rgb, pred_alpha=alpha, gt_rgb=gt_rgb, gt_alpha=gt_alpha,
                             params=self.rep.params, gaussians=g, info=info, step=step,
-                            extras={"crop": (batch.crop_size, batch.crop_origins)})
+                            extras={"crop": (batch.crop_size, batch.crop_origins)},
+                            view_weights=batch.weights)
         loss = None
         for _, weight, term in self.losses:
             value = weight * term(inputs)

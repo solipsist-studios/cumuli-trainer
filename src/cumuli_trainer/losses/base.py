@@ -13,7 +13,7 @@ whole ``LossInputs`` so regularisers can read parameters.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -29,6 +29,11 @@ class LossInputs:
     info: Dict[str, Any]
     step: int
     extras: Dict[str, Any] = field(default_factory=dict)
+    # [C] each view's ``loss_weight`` from the dataset, or None when every view
+    # counts fully. Only the colour terms (l1, ssim) use it: the regularisers
+    # and the silhouette term describe the geometry, not how far the view's
+    # pixels can be trusted.
+    view_weights: Optional[torch.Tensor] = None
 
 
 class LossTerm:

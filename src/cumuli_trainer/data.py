@@ -73,6 +73,7 @@ class Batch:
     images: torch.Tensor  # [C, H, W, 4] uint8 on the device
     crop_size: Tuple[int, int]  # (h, w) shared by every view
     crop_origins: List[Tuple[int, int]]  # per view (y0, x0)
+    weights: Optional[torch.Tensor] = None  # [C] loss_weight per view, None when all are 1
 
 
 class TrainData:
@@ -87,6 +88,11 @@ class TrainData:
             raise ValueError(f"training cameras have several image sizes {sorted(sizes)}; "
                              "time-batched rendering needs one size")
         self.width, self.height = sizes.pop()
+        if not all(hasattr(c, "loss_weight") for c in cams):
+            # An older cumuli-core drops the field at load time, which would
+            # train every view at full weight with no sign anything was ignored.
+            raise RuntimeError("the installed cumuli-core has no Camera.loss_weight; "
+                               "install a cumuli-core that reads it (after v0.1.0)")
         n = len(cams)
         nbytes = n * self.width * self.height * 4
         where = data_device
@@ -112,6 +118,12 @@ class TrainData:
         self.images = store
         self.on_device = where == "cuda"
         self.viewmats, self.Ks = core_render.camera_tensors(cams, device)
+        weights = np.array([c.loss_weight for c in cams], dtype=np.float32)
+        self.weighted = bool((weights != 1.0).any())
+        self.view_weights = torch.from_numpy(weights).to(device)
+        if self.weighted:
+            log(f"per-view loss weights: {int((weights != 1.0).sum())} of {n} views differ from 1 "
+                f"(min {weights.min():g}, mean {weights.mean():.3g}, max {weights.max():g})")
         groups = core_cameras.group_by_time(cams)
         index = {id(c): i for i, c in enumerate(cams)}
         self.times: List[float] = []
@@ -169,7 +181,9 @@ class TrainData:
         imgs = self.images[idx_img]
         if not self.on_device:
             imgs = imgs.to(self.device, non_blocking=True)
-        return Batch(time=t, index=idx, images=imgs, crop_size=size, crop_origins=origins)
+        weights = self.view_weights[idx] if self.weighted else None
+        return Batch(time=t, index=idx, images=imgs, crop_size=size, crop_origins=origins,
+                     weights=weights)
 
     def state_dict(self) -> dict:
         return {"rng": self.rng.getstate()}
