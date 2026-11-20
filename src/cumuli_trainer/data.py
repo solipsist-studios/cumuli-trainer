@@ -123,7 +123,7 @@ class TrainData:
             # An older cumuli-core drops the field at load time, which would
             # train every view at full weight with no sign anything was ignored.
             raise RuntimeError("the installed cumuli-core has no Camera.loss_weight; "
-                               "install a cumuli-core that reads it (after v0.1.0)")
+                               "install cumuli-core 0.2.0 or newer")
         n = len(cams)
         nbytes = n * self.width * self.height * 4
         where = data_device

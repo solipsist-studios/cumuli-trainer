@@ -106,7 +106,7 @@ the gradient it would add alone and a view at 0 adds none. The silhouette
 term (`opacity_mask`) and the regularisers ignore it: they describe the
 geometry, not how far the view's pixels can be trusted. Weights are read at
 load time, logged when any differ from 1, and a dataset with none trains
-exactly as before. Reading the field needs a cumuli-core newer than v0.1.0
+exactly as before. Reading the field needs cumuli-core 0.2.0 or newer
 (`Camera.loss_weight`); with v0.1.0 the trainer stops at load with an error
 rather than train every view at full weight.
 
@@ -187,6 +187,43 @@ scale from the mean distance to the 3 nearest neighbours, computed within
 each timestamp so repeated copies of a static region do not shrink each
 other; velocity and acceleration 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
 `t_init_div` 100; peak opacity 0.1.
+
+## Sub-Frame Timing
+
+Cameras that are not genlocked fire at slightly different moments. A
+`transforms_train.json` entry can say so, and the trainer renders each view at
+the moment its picture was taken. All of it is read from the dataset and costs
+nothing, and changes nothing, when the dataset has none of these keys.
+
+- `time_offset` (seconds, default 0): how much later than the nominal `time`
+  the camera took the picture. A step still groups views by `time`, slices the
+  Gaussians once per distinct capture time, and renders the views of one step
+  together. Held-out evaluation and the contribution pass use capture time too.
+- `readout_s` (seconds, default 0) and `raw_camera`: a rolling-shutter camera
+  reads its sensor rows over `readout_s`. With `readout_s > 0` each Gaussian is
+  rendered at the time the raw sensor row it projects to was read
+  (`cumuli_core.shutter`), one render per view. Output is bit-identical without
+  readouts.
+- `visit_weight` (default 1, above 0): an instant whose views carry weight `w`
+  is dealt `w` times per epoch (fractions by chance), so fast-moving frames get
+  more training. Unlike `loss_weight`, which scales how much a view's colour
+  loss counts, this changes how often the instant is visited.
+
+`time_offsets` in the config learns what the measured offsets leave over, one
+constant per physical camera, from the photometric loss. It is off unless
+`learn` is true:
+
+```yaml
+time_offsets: {learn: true, warmup: 8000, lr: 1.0e-4, reg: 0.01, clamp_frames: 0.5}
+```
+
+Each correction is clamped to `clamp_frames` of a frame by a tanh and made
+zero-mean across cameras, since a shift of every camera at once is a shift of
+the whole scene in time, which the photos cannot tell apart. Learning starts
+after `warmup` steps, and `reg` pulls the corrections back toward the measured
+offsets. They are saved in checkpoints and in `training_summary.json`
+(`camera_time_offsets_s`). Held-out test cameras are never trained, so they get
+no correction.
 
 ## Strategies
 
