@@ -89,6 +89,10 @@ class Trainer:
         if not torch.cuda.is_available():
             raise RuntimeError("cumuli-train needs a CUDA device (gsplat rasterisation)")
         self.device = torch.device("cuda")
+        # gsplat inverts each view matrix with torch.inverse, which creates a cuSOLVER handle the first time it is
+        # used on a stream. Create it now, while the GPU is empty: a long window fills the card to within a few
+        # hundred MB, and creating it then, at the held-out evaluation, failed (CUSOLVER_STATUS_INTERNAL_ERROR).
+        torch.inverse(torch.eye(4, device=self.device))
         self._seed(cfg["seed"])
         os.makedirs(cfg["model_path"], exist_ok=True)
 
@@ -403,6 +407,8 @@ class Trainer:
     def evaluate(self, step: int, bar=None) -> dict | None:
         if self.evalset is None:
             return None
+        # full-size test renders on top of training's buffers: give back the allocator's cached blocks first
+        torch.cuda.empty_cache()
         res = self.evalset.evaluate(self.rep, self.renderer, self.cfg["sh_degree"])
         m = res["mean"]
         line = progress.test_line(step, m["psnr_db"], m["ssim"], m["lpips"], len(res["views"]))
