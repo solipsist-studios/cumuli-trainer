@@ -74,8 +74,15 @@ class Representation:
         return ("means",)
 
     def slice(self, t: float, sh_degree: int) -> SlicedGaussians:
-        """Differentiable Gaussians at time ``t`` (seconds)."""
+        """Differentiable Gaussians at time ``t`` (seconds): a float, a 0-d
+        tensor, or an [N] tensor of per-Gaussian times (rolling-shutter views)."""
         raise NotImplementedError
+
+    def means_at(self, t) -> torch.Tensor:
+        """[N, 3] positions at ``t`` (as in ``slice``). Rolling-shutter timing
+        calls this to find where each Gaussian is; override with something
+        cheaper than a full slice."""
+        return self.slice(t, 0).means
 
     def peak_opacity(self) -> torch.Tensor:
         """[N] highest opacity each Gaussian reaches inside the training window.

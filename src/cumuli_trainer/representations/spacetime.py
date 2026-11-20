@@ -277,6 +277,16 @@ class SpacetimeRepresentation(Representation):
             means=means, quats=p["quats"], scales=torch.exp(p["scales"]),
             opacities=alpha, colors=colors, sh_degree=sh_degree)
 
+    def means_at(self, t) -> torch.Tensor:
+        """Positions only: the motion half of ``core_spacetime.slice_at``."""
+        p = self.params
+        tau = self.to_tau(t if torch.is_tensor(t) else float(t))
+        dt = (tau - p["t_centers"]).unsqueeze(-1)
+        means = p["means"] + p["velocities"] * dt
+        if "accelerations" in p:
+            means = means + p["accelerations"] * (dt * dt)
+        return means
+
     @torch.no_grad()
     def peak_opacity(self) -> torch.Tensor:
         """Peak opacity reached inside [time_min, time_max] (tau in [0, 1])."""

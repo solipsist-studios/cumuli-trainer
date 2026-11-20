@@ -31,6 +31,7 @@ import torch
 
 from .core import cameras as core_cameras
 from .core import render as core_render
+from .shutter import is_rolling, readout_of
 
 # data_device "auto" keeps the decoded images on the GPU when this much
 # memory stays free beside them. Heidi (610 views at 2656x2324, 14.03 GiB
@@ -99,6 +100,7 @@ class Batch:
     crop_origins: List[Tuple[int, int]]  # per view (y0, x0)
     weights: Optional[torch.Tensor] = None  # [C] loss_weight per view, None when all are 1
     times: List[float] = None  # per view, seconds: when that camera took its picture
+    views: List[int] = None  # per view, the camera index on the host (same as index)
 
     def __post_init__(self):
         if self.times is None:
@@ -160,6 +162,12 @@ class TrainData:
         if self.weighted:
             log(f"per-view loss weights: {int((weights != 1.0).sum())} of {n} views differ from 1 "
                 f"(min {weights.min():g}, mean {weights.mean():.3g}, max {weights.max():g})")
+        # views whose rows were read at different times (readout_s > 0)
+        self.rolling = [is_rolling(c) for c in cams]
+        if any(self.rolling):
+            log(f"rolling shutter: {sum(self.rolling)} of {n} views render each Gaussian at the time "
+                f"its raw sensor row was read (readout up to "
+                f"{1e3 * max(abs(readout_of(c)) for c in cams):.2f} ms)")
         groups = core_cameras.group_by_time(cams)
         index = {id(c): i for i, c in enumerate(cams)}
         self.times: List[float] = []
@@ -207,20 +215,21 @@ class TrainData:
         for b, (t, chunk) in enumerate(batches):
             size, origins = self._crop(chunk)
             times = [capture_time(self.cams[i]) for i in chunk]
-            self._epoch.append((t, idx_dev[b, :len(chunk)], idx_img[b, :len(chunk)], size, origins, times))
+            self._epoch.append((t, idx_dev[b, :len(chunk)], idx_img[b, :len(chunk)], size, origins, times,
+                                list(chunk)))
         self._pos = 0
 
     def next(self) -> Batch:
         if self._pos >= len(self._epoch):
             self._new_epoch()
-        t, idx, idx_img, size, origins, times = self._epoch[self._pos]
+        t, idx, idx_img, size, origins, times, views = self._epoch[self._pos]
         self._pos += 1
         imgs = self.images[idx_img]
         if not self.on_device:
             imgs = imgs.to(self.device, non_blocking=True)
         weights = self.view_weights[idx] if self.weighted else None
         return Batch(time=t, index=idx, images=imgs, crop_size=size, crop_origins=origins,
-                     weights=weights, times=times)
+                     weights=weights, times=times, views=views)
 
     def state_dict(self) -> dict:
         return {"rng": self.rng.getstate()}

@@ -33,7 +33,7 @@ def _look_at_c2w_gl(eye, target=(0, 0, 0)):
 MOTION_TIMES = (0.0, 0.05, 0.1)
 
 
-def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None):
+def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None, readout=None, raw_camera=None):
     from PIL import Image
     os.makedirs(root, exist_ok=True)
     frames, test = [], []
@@ -52,6 +52,10 @@ def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None):
                        "camera_label": f"{ci}", "transform_matrix": c2w.tolist()}
                 if offsets and split == "train":
                     row["time_offset"] = offsets[ci]
+                if readout is not None:
+                    row["readout_s"] = readout
+                if raw_camera is not None:
+                    row["raw_camera"] = raw_camera
                 out.append(row)
     for name, fr in (("transforms_train.json", frames), ("transforms_test.json", test)):
         with open(os.path.join(root, name), "w") as fp:

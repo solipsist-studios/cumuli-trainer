@@ -18,6 +18,11 @@ One step:
     loss.backward(); optimizers step
     strategy.step_post_backward(...)                densify / prune / relocate
 
+Views whose cameras took their pictures at different times (time_offset)
+are sliced per view and rendered together (renderer.render_each); a
+rolling-shutter view (readout_s > 0) is sliced with each Gaussian at its
+raw sensor row's time (shutter.py).
+
 There are no host synchronisations in a step except every ``log_every``
 steps (progress bar) and on the strategy's refine steps.
 """
@@ -40,6 +45,7 @@ from .core import CORE_VERSION
 from .core import dataset as core_dataset
 from .core import ply as core_ply
 from .data import TrainData, capture_time
+from .shutter import slice_view
 from .time_offsets import CameraTimeOffsets
 from .evaluate import EvalSet
 from .losses.base import LossInputs
@@ -239,25 +245,36 @@ class Trainer:
         While capture-time corrections are being learned, each view's time is
         its capture time plus its camera's correction, as a tensor, so the
         photometric loss reaches the corrections.
+        A rolling-shutter view (readout_s > 0) slices each Gaussian at the time
+        its raw sensor row was read in that view (``shutter.slice_view``), so
+        it always renders through the per-view path.
         Returns (rgb, alpha, info, the first view's sliced Gaussians)."""
         vm, ks = self.data.viewmats[batch.index], self.data.Ks[batch.index]
         w, h = self.data.width, self.data.height
+        views = batch.views if batch.views is not None else [int(i) for i in batch.index.tolist()]
+        rolling = [self.data.rolling[i] for i in views]
         if self.learning_offsets(step):
             corr = self.time_offsets.effective()[self.view_offset[batch.index]]
             base = torch.tensor(list(batch.times), dtype=corr.dtype, device=corr.device)
-            gs = [self.rep.slice(t, sh_degree) for t in (base + corr).unbind(0)]
+            gs = [slice_view(self.rep, t, sh_degree, self.data.cams[i], vm[c]) if r
+                  else self.rep.slice(t, sh_degree)
+                  for c, (t, i, r) in enumerate(zip((base + corr).unbind(0), views, rolling))]
             rgb, alpha, info = self.renderer.render_each(gs, vm, ks, w, h)
             return rgb, alpha, info, gs[0]
         times = list(batch.times)
-        if len(set(times)) <= 1:
+        if len(set(times)) <= 1 and not any(rolling):
             g = self.rep.slice(times[0] if times else batch.time, sh_degree)
             rgb, alpha, info = self.renderer.render(g, vm, ks, w, h)
             return rgb, alpha, info, g
         sliced = {}
-        for t in times:
+        gs = []
+        for c, (t, i, r) in enumerate(zip(times, views, rolling)):
+            if r:
+                gs.append(slice_view(self.rep, t, sh_degree, self.data.cams[i], vm[c]))
+                continue
             if t not in sliced:
                 sliced[t] = self.rep.slice(t, sh_degree)
-        gs = [sliced[t] for t in times]
+            gs.append(sliced[t])
         rgb, alpha, info = self.renderer.render_each(gs, vm, ks, w, h)
         return rgb, alpha, info, gs[0]
 
@@ -332,12 +349,15 @@ class Trainer:
         with torch.enable_grad():
             for i, cam in enumerate(self.data.cams):
                 t = capture_time(cam)
-                if t not in sliced:
+                # a rolling-shutter view has its own per-Gaussian times
+                key = ("view", i) if self.data.rolling[i] else t
+                if key not in sliced:
                     sliced.clear()
-                    g = self.rep.slice(t, 0)
-                    sliced[t] = (g.means.detach(), g.quats.detach(),
-                                 g.scales.detach(), g.opacities.detach())
-                means, quats, scales, opac = sliced[t]
+                    with torch.no_grad():
+                        g = slice_view(self.rep, t, 0, cam, self.data.viewmats[i])
+                    sliced[key] = (g.means.detach(), g.quats.detach(),
+                                   g.scales.detach(), g.opacities.detach())
+                means, quats, scales, opac = sliced[key]
                 best = torch.maximum(best, view_contribution(
                     means, quats, scales, opac, self.data.viewmats[i:i + 1],
                     self.data.Ks[i:i + 1], self.data.width, self.data.height))

@@ -2,7 +2,8 @@
 # Required Notice: Copyright 2026 Solipsist Studios Inc. (https://solipsist.studio)
 """Test-camera scoring during training.
 
-Renders each test camera at its own timestamp, composites onto the test
+Renders each test camera at its own capture time (each Gaussian at its raw
+sensor row's time for a rolling-shutter camera), composites onto the test
 background, clamps to [0, 1] and scores PSNR, SSIM and LPIPS with
 ``cumuli_core.metrics``, which matches cumuli ``scripts/eval_render.py``.
 Ground truth is the test frame's RGBA composited onto the same background.
@@ -18,6 +19,7 @@ import torch
 from .core import metrics as core_metrics
 from .core import render as core_render
 from .data import _load_uint8, capture_time
+from .shutter import readout_of, slice_view
 
 
 class EvalSet:
@@ -39,7 +41,8 @@ class EvalSet:
         rows = []
         lp = self.lpips()
         for i, cam in enumerate(self.cams):
-            g = representation.slice(capture_time(cam), sh_degree)
+            # a rolling-shutter view slices each Gaussian at its row's time
+            g = slice_view(representation, capture_time(cam), sh_degree, cam, self.viewmats[i])
             rgb, alpha, _ = renderer.render(g, self.viewmats[i:i + 1], self.Ks[i:i + 1],
                                             cam.width, cam.height)
             img = (rgb[0] + (1.0 - alpha[0]) * self.bg).clamp(0.0, 1.0)
@@ -48,6 +51,7 @@ class EvalSet:
             gt = gt[..., :3] * a + (1.0 - a) * self.bg
             rows.append({
                 "name": cam.name, "time": float(cam.time), "capture_time": capture_time(cam),
+                "readout_s": readout_of(cam),
                 "psnr_db": float(core_metrics.psnr(img, gt)),
                 "ssim": float(core_metrics.ssim(img, gt)),
                 "lpips": float(lp(img, gt)),
