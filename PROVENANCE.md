@@ -45,7 +45,8 @@ duration.
 
 ## Degree-2 motion
 
-Pending legal review. The change was written from `docs/sogst-format.md`
+Cleared for release by Solipsist Studios on 2026-11-20; the record of what was
+read is kept below. The change was written from `docs/sogst-format.md`
 sections 1, 4.8 and 7, the cumuli-core API and the existing `velocities` code
 in this repository.
 
