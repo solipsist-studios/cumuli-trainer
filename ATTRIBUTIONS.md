@@ -12,6 +12,7 @@ projects below. No third-party source code is included in this repository.
 | Li, Chen, Li, Xu, "Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis", CVPR 2024 | Polynomial motion and temporal radial-basis opacity |
 | Kheradmand et al., "3D Gaussian Splatting as Markov Chain Monte Carlo", 2024 | MCMC densification, relocation, and the opacity and scale regularisers |
 | Xie et al., "PhysGaussian: Physics-Integrated 3D Gaussians for Generative Dynamics", CVPR 2024 | The anisotropy regulariser |
+| Lee, Lee, Lee, Lee, Jeong, Kim, Song, Lee, Ko, Park, Park, "Optimized Minimal 4D Gaussian Splatting for Efficient Dynamic Scene Representation", arXiv:2510.03857, 2025 (https://arxiv.org/abs/2510.03857) | The OMG4 baseline that the parity runs in `configs/dur12_parity.yaml` compare against |
 | Wang, Bovik, Sheikh, Simoncelli, "Image Quality Assessment: From Error Visibility to Structural Similarity", IEEE TIP 2004 | SSIM |
 
 ## Software
@@ -21,8 +22,9 @@ projects below. No third-party source code is included in this repository.
   dependency. Parameter names, default thresholds and learning rates for the
   densification strategies follow gsplat's `DefaultStrategy`, `MCMCStrategy`
   and `simple_trainer.py`.
-- **OMG4** (the OMG4 trainer's dataset convention): the per-view `loss_weight`
-  key of a transforms entry, and its scope, which is the colour loss terms.
+- **OMG4** code release (the implementation of the paper above): the dataset
+  convention for the per-view `loss_weight` key of a transforms entry, and its
+  scope, which is the colour loss terms.
 - **PyTorch**, **torchmetrics** and **lpips**: the tensor library and the
   evaluation metrics, used as libraries.
 
