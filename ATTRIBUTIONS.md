@@ -25,6 +25,16 @@ projects below. No third-party source code is included in this repository.
 - **OMG4** code release (the implementation of the paper above): the dataset
   convention for the per-view `loss_weight` key of a transforms entry, and its
   scope, which is the colour loss terms.
+- **Open4DGS-Core** (MIT, https://open4dgs.asunemlabs.com) and **Open4DGS-Trigs**
+  (AGPL-3.0, https://github.com/ASU-NEM-Labs/open4dgs-trigs): design references
+  for sub-frame timing, read for their documentation and a few source excerpts.
+  No code from either project is included. They informed the idea of learning a
+  per-camera capture-time correction from the image loss (`time_offsets.py`,
+  whose warmup, learning rate, regulariser weight and clamp defaults follow the
+  Trigs README), rendering each camera at its own capture time, the mid-line
+  rolling-shutter time convention, rolling-shutter times taken from each
+  Gaussian's projected sensor row (`shutter.py`), and giving fast-moving frames
+  more training visits (`data.py`).
 - **PyTorch**, **torchmetrics** and **lpips**: the tensor library and the
   evaluation metrics, used as libraries.
 
@@ -35,7 +45,7 @@ projects below. No third-party source code is included in this repository.
   formats, the render settings and the evaluation conventions the trainer shares
   with the rest of the pipeline.
 - cumuli-core: the shared library for cameras, datasets, the PLY format, the
-  spacetime slice and metrics.
+  spacetime slice, rolling-shutter geometry and metrics.
 - comfyui-cumuli `cumuli_bridge/train.py`: the progress-line patterns in
   `progress.py` and `tests/test_progress.py`.
 

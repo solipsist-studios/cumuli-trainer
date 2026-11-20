@@ -5,8 +5,8 @@ Gaussians (position, velocity, temporal envelope) with gsplat and writes the
 4D interchange PLY. Representations, densification strategies, loss terms and
 the renderer are plugins chosen by name in the run config.
 
-Written from published papers, the gsplat API and Solipsist's own format spec.
-Sources and licenses are in `ATTRIBUTIONS.md`.
+Written from published papers, the gsplat API, Solipsist's own format spec and the
+design references listed in `ATTRIBUTIONS.md`, which also gives sources and licenses.
 
 ## Install
 
