@@ -6,7 +6,7 @@ Gaussians (position, velocity, temporal envelope) with gsplat and writes the
 the renderer are plugins chosen by name in the run config.
 
 Clean-room: written from published papers, the gsplat API and Solipsist's own
-format spec. See `PROVENANCE.md`.
+format spec.
 
 ## Install
 
