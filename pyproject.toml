@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cumuli-trainer"
-version = "0.1.0"
+version = "0.2.0"
 description = "4D Gaussian splatting trainer for the Cumuli pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,7 @@ dependencies = [
     "pillow",
     "torchmetrics",
     "lpips",
-    "cumuli-core @ git+https://github.com/solipsist-studios/cumuli-core.git@v0.1.0",
+    "cumuli-core @ git+https://github.com/solipsist-studios/cumuli-core.git@v0.2.0",
 ]
 
 [project.optional-dependencies]

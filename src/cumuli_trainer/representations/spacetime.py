@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Required Notice: Copyright 2026 Solipsist Studios Inc. (https://solipsist.studio)
-"""Spacetime Gaussians: 3D Gaussians with linear motion and a temporal window.
+"""Spacetime Gaussians: 3D Gaussians with polynomial motion and a temporal window.
 
 Model (cumuli docs/sogst-format.md section 1; the polynomial-motion and
 temporal radial-basis opacity of Li et al. CVPR 2024, "Spacetime Gaussian
-Feature Splatting", section 3, restricted to linear motion and constant
-rotation/scale):
+Feature Splatting", section 3, restricted to motion of degree 1 or 2 and
+constant rotation/scale):
 
     dt       = t - t_center
-    mean(t)  = xyz + v * dt
+    mean(t)  = xyz + v * dt                 (motion_degree 1, the default)
+    mean(t)  = xyz + v * dt + a * dt * dt   (motion_degree 2)
     alpha(t) = sigmoid(opacity) * exp(-0.5 * (dt / t_sigma)^2)
+
+``a`` is the raw dt^2 coefficient, not half-acceleration (section 1).
 
 Parameters, one row per Gaussian, in a dict with gsplat's key names:
 
@@ -22,6 +25,8 @@ Parameters, one row per Gaussian, in a dict with gsplat's key names:
     velocities    [N, 3]   scene units per unit of normalised time
     t_centers     [N]      normalised time
     t_log_sigmas  [N]      log of the normalised temporal std-dev
+    accelerations [N, 3]   dt^2 coefficient in scene units per normalised time
+                           squared; only at motion_degree 2
 
 Time is normalised internally, tau = (t - time_min) / duration, so learning
 rates do not depend on clip length. ``to_interchange`` converts back to
@@ -43,13 +48,14 @@ temporal model and need no special handling.
 Initialisation follows the brief: positions, colours and times from the
 dataset's points3d.ply, spatial scale from the mean distance to the 3 nearest
 neighbours (scipy cKDTree, computed within each timestamp so twelve copies of
-a static region do not shrink each other), velocity 0, and
+a static region do not shrink each other), velocity 0, acceleration 0, and
 t_sigma = sqrt(duration_seconds / t_init_div).
 """
 
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import torch
@@ -96,12 +102,17 @@ class SpacetimeRepresentation(Representation):
                       trains; at 10 durations the fade across the clip is
                       under 0.5%, so the cap changes nothing visible and keeps
                       the exported sigmas in a range packers quantise well.
+    motion_degree     1 (linear, the default) or 2 (adds a trained dt^2 term
+                      and writes ax, ay, az to the interchange PLY)
     """
 
     def __init__(self, ctx: RepresentationContext, init_opacity=0.1, init_scale=1.0,
                  init_knn=3, knn_per_time=True, max_init_points=None, min_t_sigma_frames=0.0,
-                 max_t_sigma=10.0, seed=0):
+                 max_t_sigma=10.0, seed=0, motion_degree=1):
         super().__init__(ctx)
+        if motion_degree not in (1, 2):
+            raise ValueError(f"motion_degree must be 1 or 2, got {motion_degree!r}")
+        self.motion_degree = int(motion_degree)
         self.init_opacity = float(init_opacity)
         self.init_scale = float(init_scale)
         self.init_knn = int(init_knn)
@@ -124,7 +135,7 @@ class SpacetimeRepresentation(Representation):
 
     # -- construction -----------------------------------------------------
     def _alloc(self, xyz, rgb, tau, log_scales, log_sigma, quats=None, opacity_logit=None,
-               velocities=None, shN=None):
+               velocities=None, shN=None, accelerations=None):
         dev = self.ctx.device
         n = len(xyz)
         k = (self.ctx.sh_degree + 1) ** 2
@@ -146,7 +157,7 @@ class SpacetimeRepresentation(Representation):
         if np.ndim(log_sigma) == 0:
             log_sigma = np.full(n, float(log_sigma), dtype=np.float32)
         P = torch.nn.Parameter
-        self._set_params({
+        params = {
             "means": P(t(xyz)),
             "quats": P(t(quats)),
             "scales": P(t(log_scales)),
@@ -156,7 +167,24 @@ class SpacetimeRepresentation(Representation):
             "velocities": P(t(velocities)),
             "t_centers": P(t(tau)),
             "t_log_sigmas": P(t(log_sigma)),
-        })
+        }
+        if self.motion_degree == 2:
+            if accelerations is None:
+                accelerations = np.zeros((n, 3), dtype=np.float32)
+            params["accelerations"] = P(t(accelerations))
+        self._set_params(params)
+
+    def load_state_dict(self, state: dict) -> None:
+        """A checkpoint's motion degree has to agree with the config: its keys
+        would otherwise decide the model and silently override the config. A
+        linear checkpoint continues at degree 2 from zero acceleration."""
+        has_accel = "accelerations" in state
+        if has_accel and self.motion_degree == 1:
+            raise ValueError("this checkpoint has degree-2 motion but motion_degree is 1; "
+                             "set representation.motion_degree to 2")
+        if not has_accel and self.motion_degree == 2:
+            state = dict(state, accelerations=torch.zeros_like(state["means"]))
+        super().load_state_dict(state)
 
     def init_from_points(self, points: dict) -> None:
         xyz = np.asarray(points["xyz"], dtype=np.float32)
@@ -198,13 +226,20 @@ class SpacetimeRepresentation(Representation):
             width = f["f_rest"].shape[1]
             c = width // 3
             shN = f["f_rest"].reshape(-1, 3, c).transpose(0, 2, 1)
+        accel_tau = None
+        if "ax" in f:
+            if self.motion_degree == 1:
+                raise ValueError("init_ply has degree-2 motion but motion_degree is 1; "
+                                 "set representation.motion_degree to 2")
+            accel_tau = np.stack([f["ax"], f["ay"], f["az"]], 1) * self.duration ** 2
         self._alloc(xyz, rgb, tau, log_scales, log_sigma, quats=quats,
-                    opacity_logit=f["opacity"], velocities=vel_sec * self.duration, shN=shN)
+                    opacity_logit=f["opacity"], velocities=vel_sec * self.duration, shN=shN,
+                    accelerations=accel_tau)
 
     # -- training ---------------------------------------------------------
     def learning_rates(self, lr_cfg: dict) -> dict:
         s = self.ctx.scene_scale
-        return {
+        lrs = {
             "means": lr_cfg["means"] * s,
             "quats": lr_cfg["quats"],
             "scales": lr_cfg["scales"],
@@ -215,8 +250,13 @@ class SpacetimeRepresentation(Representation):
             "t_centers": lr_cfg["t_centers"],
             "t_log_sigmas": lr_cfg["t_log_sigmas"],
         }
+        if self.motion_degree == 2:
+            lrs["accelerations"] = lr_cfg["accelerations"] * s
+        return lrs
 
     def decayed_params(self) -> tuple:
+        if self.motion_degree == 2:
+            return ("means", "velocities", "accelerations")
         return ("means", "velocities")
 
     def _sigmas(self):
@@ -227,13 +267,25 @@ class SpacetimeRepresentation(Representation):
 
     def slice(self, t: float, sh_degree: int) -> SlicedGaussians:
         p = self.params
-        tau = self.to_tau(float(t))
+        # A tensor time stays a tensor, so learned capture-time corrections get a gradient.
+        tau = self.to_tau(t if torch.is_tensor(t) else float(t))
         means, alpha = core_spacetime.slice_at(
-            p["means"], p["velocities"], p["opacities"], p["t_centers"], self._sigmas(), tau)
+            p["means"], p["velocities"], p["opacities"], p["t_centers"], self._sigmas(), tau,
+            accel=p.get("accelerations"))
         colors = torch.cat([p["sh0"], p["shN"]], dim=1)
         return SlicedGaussians(
             means=means, quats=p["quats"], scales=torch.exp(p["scales"]),
             opacities=alpha, colors=colors, sh_degree=sh_degree)
+
+    def means_at(self, t) -> torch.Tensor:
+        """Positions only: the motion half of ``core_spacetime.slice_at``."""
+        p = self.params
+        tau = self.to_tau(t if torch.is_tensor(t) else float(t))
+        dt = (tau - p["t_centers"]).unsqueeze(-1)
+        means = p["means"] + p["velocities"] * dt
+        if "accelerations" in p:
+            means = means + p["accelerations"] * (dt * dt)
+        return means
 
     @torch.no_grad()
     def peak_opacity(self) -> torch.Tensor:
@@ -278,4 +330,12 @@ class SpacetimeRepresentation(Representation):
         if shn.shape[1] > 0:
             # [N, K-1, 3] -> channel-major [N, 3*(K-1)]: column j*c + k
             fields["f_rest"] = shn.transpose(0, 2, 1).reshape(len(shn), -1)
+        if "accelerations" in p:
+            # The spec forbids emitting accel that the model does not provide
+            # (sogst-format.md section 4.8), and all zeros is exactly that.
+            if np.any(p["accelerations"]):
+                accel = p["accelerations"] / (d * d)
+                fields["ax"], fields["ay"], fields["az"] = accel[:, 0], accel[:, 1], accel[:, 2]
+            else:
+                warnings.warn("every acceleration is exactly zero; writing a degree-1 PLY")
         return fields

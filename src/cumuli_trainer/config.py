@@ -76,8 +76,10 @@ DEFAULT_LR = {
     # Temporal parameters. Time is normalised to [0, 1] over time_duration
     # inside the trainer, so these do not depend on clip length. velocities
     # are scene units per normalised time, multiplied by the scene scale and
-    # decayed like means. See README for how they were chosen.
+    # decayed like means. accelerations (motion_degree 2 only) are the same
+    # per normalised time squared. See README for how they were chosen.
     "velocities": 1.6e-4,
+    "accelerations": 1.6e-4,
     "t_centers": 1e-3,
     "t_log_sigmas": 5e-3,
 }
@@ -120,6 +122,8 @@ DEFAULTS: dict[str, Any] = {
     # 51% of them, 86% of the off-palette opaque ones, and moved held-out
     # cam05 from 36.07 to 36.12 dB (LPIPS 0.0096 both).
     "export_min_contribution": 2.0,
+    # Learned per-camera capture-time corrections (time_offsets.py); off unless "learn" is true.
+    "time_offsets": None,
 }
 
 # Sections whose contents belong to a plugin and are validated by it.
@@ -252,6 +256,8 @@ def validate(cfg: dict) -> None:
     cfg["cameras_per_step"] = int(cfg["cameras_per_step"])
     if cfg["cameras_per_step"] < 1:
         raise ConfigError("cameras_per_step must be at least 1")
+    from .time_offsets import validate as validate_time_offsets
+    cfg["time_offsets"] = validate_time_offsets(cfg["time_offsets"])
     bg = cfg["background"]
     if isinstance(bg, (list, tuple)):
         if len(bg) != 3:

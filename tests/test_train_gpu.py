@@ -26,7 +26,15 @@ def _look_at_c2w_gl(eye, target=(0, 0, 0)):
     return m
 
 
-def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
+# Motion only trains on Gaussians drawn away from their t_center: the gradient
+# of v * dt and a * dt^2 is zero at dt = 0. With two frames the initial window
+# fades the other frame's Gaussians below gsplat's 1/255 cull, so every drawn
+# Gaussian has dt = 0. Tests of motion need these three frames.
+MOTION_TIMES = (0.0, 0.05, 0.1)
+
+
+def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48, offsets=None, readout=None, raw_camera=None,
+                 weights=None):
     from PIL import Image
     os.makedirs(root, exist_ok=True)
     frames, test = [], []
@@ -38,11 +46,20 @@ def make_dataset(root, n_cams=4, times=(0.0, 0.1), w=64, h=48):
                 rel = f"{split}/c{ci}_t{ti}"
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 img = np.zeros((h, w, 4), np.uint8)
-                img[h // 4: 3 * h // 4, w // 3: 2 * w // 3] = (200, 80 + 100 * ti, 40, 255)
+                img[h // 4: 3 * h // 4, w // 3: 2 * w // 3] = (200, min(80 + 100 * ti, 255), 40, 255)
                 Image.fromarray(img).save(os.path.join(root, rel + ".png"))
-                out.append({"file_path": rel, "time": t, "fl_x": 60.0, "fl_y": 60.0,
-                            "cx": w / 2, "cy": h / 2, "w": w, "h": h,
-                            "camera_label": f"{ci}", "transform_matrix": c2w.tolist()})
+                row = {"file_path": rel, "time": t, "fl_x": 60.0, "fl_y": 60.0,
+                       "cx": w / 2, "cy": h / 2, "w": w, "h": h,
+                       "camera_label": f"{ci}", "transform_matrix": c2w.tolist()}
+                if offsets and split == "train":
+                    row["time_offset"] = offsets[ci]
+                if readout is not None:
+                    row["readout_s"] = readout
+                if raw_camera is not None:
+                    row["raw_camera"] = raw_camera
+                if weights and split == "train" and ti in weights:
+                    row["visit_weight"] = weights[ti]
+                out.append(row)
     for name, fr in (("transforms_train.json", frames), ("transforms_test.json", test)):
         with open(os.path.join(root, name), "w") as fp:
             json.dump({"camera_model": "OPENCV", "frames": fr}, fp)
@@ -128,3 +145,239 @@ def test_view_contribution_is_near_zero_for_a_hidden_gaussian():
     # gsplat caps alpha at 0.99, so 1% leaks through: far below the 2 px cut
     assert contrib[1] < 0.02 * alone[0]
     assert contrib[1] < 0.5
+
+
+@pytest.mark.gpu
+def test_train_with_per_view_loss_weights(tmp_path):
+    """A dataset with loss_weight on its views trains to the end, reports the
+    weights, and a zero-weight view still takes part (silhouette term)."""
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds)
+    path = os.path.join(ds, "transforms_train.json")
+    with open(path) as fp:
+        t = json.load(fp)
+    for i, frame in enumerate(t["frames"]):
+        frame["loss_weight"] = [1.0, 0.5, 0.0, 1.0][i % 4]
+    with open(path, "w") as fp:
+        json.dump(t, fp)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 30,
+                        "sh_degree": 1, "sh_degree_interval": 20, "cameras_per_step": 2,
+                        "strategy": {"name": "default", "refine_start": 10, "refine_every": 10,
+                                     "refine_stop": 1000},
+                        "test_iterations": [30], "save_iterations": [30],
+                        "checkpoint_iterations": [], "log_every": 5})
+    lines = []
+    summary = Trainer(cfg, log=lines.append).run()
+    assert any("per-view loss weights: 4 of 8 views differ from 1" in m for m in lines)
+    assert math.isfinite(summary["tests"][-1]["psnr_db"]) and summary["tests"][-1]["psnr_db"] > 5
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("strategy", ["mcmc", "default"])
+def test_degree_2_train_save_resume_and_seed(tmp_path, strategy):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=MOTION_TIMES)
+    strat = {"name": strategy, "refine_start": 10, "refine_every": 10, "refine_stop": 1000}
+    if strategy == "mcmc":
+        strat.update(cap_max=600, grow_rate=1.5)
+    deg2 = {"name": "spacetime", "motion_degree": 2}
+    base = {"source_path": ds, "iterations": 40, "sh_degree": 1, "sh_degree_interval": 20,
+            "cameras_per_step": 2, "strategy": strat, "test_iterations": [40],
+            "save_iterations": [40], "checkpoint_iterations": [20, 40], "log_every": 5}
+
+    # a degree-2 run trains the term and writes it
+    out = str(tmp_path / "deg2")
+    Trainer(build_config({**base, "model_path": out, "representation": deg2}),
+            log=lambda m: None).run()
+    ply_path = os.path.join(out, "splat_4d.ply")
+    header, fields = core_ply.read_sogst_ply(ply_path)
+    assert header["motion_degree"] == 2
+    assert np.any(np.stack([fields["ax"], fields["ay"], fields["az"]]) != 0)
+
+    # resume across densification keeps every row aligned, Adam state included
+    cfg = build_config({**base, "model_path": str(tmp_path / "resumed"), "representation": deg2})
+    tr = Trainer(cfg, resume=os.path.join(out, "ckpt_20.pt"), log=lambda m: None)
+    assert tr.start_step == 21 and "accelerations" in tr.rep.params
+    tr.run()
+    assert tr.rep.params["accelerations"].shape == tr.rep.params["means"].shape
+
+    # resume or seed at degree 1 refuses rather than dropping the term
+    deg1 = build_config({**base, "model_path": str(tmp_path / "refused")})
+    with pytest.raises(ValueError, match="motion_degree"):
+        Trainer(deg1, resume=os.path.join(out, "ckpt_20.pt"), log=lambda m: None)
+    with pytest.raises(ValueError, match="motion_degree"):
+        Trainer({**deg1, "init_ply": ply_path}, log=lambda m: None)
+
+    # seed a degree-2 run from its own PLY
+    seeded = build_config({**base, "model_path": str(tmp_path / "seeded"), "representation": deg2,
+                           "init_ply": ply_path, "iterations": 5, "test_iterations": [5],
+                           "save_iterations": [5], "checkpoint_iterations": []})
+    tr = Trainer(seeded, log=lambda m: None)
+    assert tr.rep.num_gaussians == header["count"]
+    tr.run()
+
+
+@pytest.mark.gpu
+def test_degree_1_checkpoint_continues_at_degree_2(tmp_path):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=MOTION_TIMES)
+    base = {"source_path": ds, "iterations": 20, "sh_degree": 1, "sh_degree_interval": 20,
+            "cameras_per_step": 2, "test_iterations": [20], "save_iterations": [20],
+            "checkpoint_iterations": [10], "log_every": 5,
+            "strategy": {"name": "mcmc", "cap_max": 600, "refine_start": 5, "refine_every": 5}}
+    out = str(tmp_path / "deg1")
+    Trainer(build_config({**base, "model_path": out}), log=lambda m: None).run()
+    _, plain = core_ply.read_sogst_ply(os.path.join(out, "splat_4d.ply"))
+    assert "ax" not in plain
+
+    out2 = str(tmp_path / "deg2")
+    cfg = build_config({**base, "model_path": out2,
+                        "representation": {"name": "spacetime", "motion_degree": 2}})
+    tr = Trainer(cfg, resume=os.path.join(out, "ckpt_10.pt"), log=lambda m: None)
+    assert torch.all(tr.rep.params["accelerations"] == 0)
+    tr.run()
+    header, fields = core_ply.read_sogst_ply(os.path.join(out2, "splat_4d.ply"))
+    assert header["motion_degree"] == 2 and np.any(fields["ax"] != 0)
+
+
+OFFSETS = (0.0, 0.004, -0.006, 0.008)  # seconds, under half a frame at 60 fps
+
+
+@pytest.mark.gpu
+def test_views_render_at_their_own_capture_time(tmp_path):
+    """A batch of one instant whose cameras fired at different times renders each
+    view from the Gaussians sliced at that camera's time: the same pixels as
+    rendering the views one by one."""
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, offsets=OFFSETS)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 1,
+                        "sh_degree": 0, "cameras_per_step": 4, "test_iterations": [],
+                        "save_iterations": [], "checkpoint_iterations": []})
+    tr = Trainer(cfg, log=lambda m: None)
+    with torch.no_grad():
+        tr.rep.params["velocities"].normal_(std=2.0)  # motion, so time matters
+    batch = tr.data.next()
+    assert len(set(batch.times)) == 4
+    assert {round(t - batch.time, 6) for t in batch.times} == {round(o, 6) for o in OFFSETS}
+    with torch.no_grad():
+        rgb, alpha, info, _ = tr.render_batch(batch, 0)
+        assert info["n_cameras"] == 4
+        for c, t in enumerate(batch.times):
+            g = tr.rep.slice(t, 0)
+            one, a1, _ = tr.renderer.render(g, tr.data.viewmats[batch.index[c:c + 1]],
+                                            tr.data.Ks[batch.index[c:c + 1]], tr.data.width, tr.data.height)
+            assert torch.allclose(rgb[c], one[0], atol=1e-5)
+            assert torch.allclose(alpha[c], a1[0], atol=1e-5)
+        # rendering everything at the nominal time instead gives different pictures
+        g = tr.rep.slice(batch.time, 0)
+        nominal, _, _ = tr.renderer.render(g, tr.data.viewmats[batch.index], tr.data.Ks[batch.index],
+                                           tr.data.width, tr.data.height)
+        assert not torch.allclose(rgb[1:], nominal[1:], atol=1e-4)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("strategy", ["mcmc", "default"])
+def test_train_with_sub_frame_offsets(tmp_path, strategy):
+    from cumuli_trainer.trainer import Trainer
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, offsets=OFFSETS)
+    strat = {"name": strategy, "refine_start": 10, "refine_every": 10, "refine_stop": 1000}
+    if strategy == "mcmc":
+        strat.update(cap_max=600, grow_rate=1.5)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "out"), "iterations": 40,
+                        "sh_degree": 0, "cameras_per_step": 2, "strategy": strat,
+                        "test_iterations": [40], "save_iterations": [40], "checkpoint_iterations": []})
+    summary = Trainer(cfg, log=lambda m: None).run()
+    assert summary["tests"][-1]["psnr_db"] > 10
+    if strategy == "default":
+        assert summary["num_gaussians"] != 400  # the batched layout still feeds densification
+
+
+@pytest.mark.gpu
+def test_learned_time_offsets_recover_how_late_each_camera_fired(tmp_path):
+    """Photos of a moving scene taken at time + true offset per camera; a model that already
+    fits the scene, everything but the corrections frozen: the learned corrections come out
+    as the true offsets (zero-meaned, since a shift of every camera is not observable)."""
+    from PIL import Image
+
+    from cumuli_trainer.trainer import Trainer
+
+    true = torch.tensor([0.0, 0.02, -0.03, 0.01])
+    ds = str(tmp_path / "ds")
+    make_dataset(ds)
+    cfg = build_config({"source_path": ds, "model_path": str(tmp_path / "gt"), "iterations": 400, "sh_degree": 0,
+                        "cameras_per_step": 2, "strategy": {"name": "default", "refine_stop": 0},
+                        "losses": {"opacity_mask": 0, "aniso_reg": 0},
+                        "test_iterations": [], "save_iterations": [], "checkpoint_iterations": []})
+    scene = Trainer(cfg, log=lambda m: None)
+    with torch.no_grad():
+        g = torch.Generator(device="cuda").manual_seed(1)
+        scene.rep.params["velocities"].copy_(torch.randn(scene.rep.params["velocities"].shape, generator=g, device="cuda") * 3)
+        scene.rep.params["opacities"].fill_(3.0)
+        scene.rep.params["t_log_sigmas"].fill_(3.0)  # visible all the time: only motion carries timing
+        scene.rep.params["sh0"].copy_(torch.rand(scene.rep.params["sh0"].shape, generator=g, device="cuda") * 2 - 1)
+        for i, cam in enumerate(scene.data.cams):
+            sl = scene.rep.slice(cam.time + float(true[int(cam.label)]), 0)
+            rgb, alpha, _ = scene.renderer.render(sl, scene.data.viewmats[i:i + 1], scene.data.Ks[i:i + 1],
+                                                  scene.data.width, scene.data.height)
+            a = alpha[0].clamp(1e-6, 1)
+            rgba = torch.cat([(rgb[0] / a).clamp(0, 1), alpha[0]], dim=-1)
+            Image.fromarray((rgba.cpu().numpy() * 255).round().astype(np.uint8)).save(cam.image_path + ".png")
+
+    cfg2 = build_config({**{k: v for k, v in cfg.items() if k not in ("time_offsets",)},
+                         "model_path": str(tmp_path / "learn"),
+                         "time_offsets": {"learn": True, "warmup": 0, "lr": 2e-3, "reg": 0.0, "clamp_frames": 0.6}})
+    tr = Trainer(cfg2, log=lambda m: None)
+    with torch.no_grad():
+        for k, p in tr.rep.params.items():
+            p.copy_(scene.rep.params[k])
+    for opt in tr.optimizers.values():
+        for group in opt.param_groups:
+            group["lr"] = 0.0
+    tr.lr_init = {k: 0.0 for k in tr.lr_init}
+    for step in range(1, 401):
+        tr.train_step(step)
+    learned = torch.tensor([tr.time_offsets.seconds()[str(i)] for i in range(4)])
+    want = true - true.mean()
+    assert torch.allclose(learned, want, atol=0.004), (learned, want)
+    assert tr.time_offsets.seconds() == pytest.approx({str(i): float(v) for i, v in enumerate(learned)})
+
+
+def test_time_offsets_config_is_off_by_default_and_checked():
+    from cumuli_trainer.config import ConfigError
+
+    base = {"source_path": "/d", "model_path": "/m"}
+    assert build_config(base)["time_offsets"] == {"learn": False, "warmup": 8000, "lr": 1e-4, "reg": 0.01,
+                                                  "clamp_frames": 0.5}
+    assert build_config({**base, "time_offsets": True})["time_offsets"]["learn"] is True
+    with pytest.raises(ConfigError, match="unknown time_offsets"):
+        build_config({**base, "time_offsets": {"lern": True}})
+    with pytest.raises(ConfigError):
+        build_config({**base, "time_offsets": {"clamp_frames": 0}})
+
+
+@pytest.mark.gpu
+def test_a_weighted_instant_is_visited_that_many_times_as_often(tmp_path):
+    """visit_weight w on an instant's views deals it w times per epoch (fractions by chance)."""
+    from collections import Counter
+
+    from cumuli_trainer.core import dataset as core_dataset
+    from cumuli_trainer.data import TrainData
+
+    ds = str(tmp_path / "ds")
+    make_dataset(ds, times=(0.0, 0.1, 0.2), weights={1: 3.0, 2: 1.5})
+    d = core_dataset.Dataset4D(ds)
+    data = TrainData(d, d.train_cameras, torch.device("cuda"), 2, seed=0, log=lambda m: None)
+    counts = Counter()
+    epochs = 200
+    for _ in range(epochs):
+        data._new_epoch()
+        counts.update(round(e[0], 3) for e in data._epoch)
+    per_epoch = {t: n / epochs for t, n in counts.items()}
+    assert per_epoch[0.0] == 2.0  # 4 cameras, 2 per step: one pass is 2 batches
+    assert per_epoch[0.1] == 6.0  # weight 3: three passes
+    assert 2.6 < per_epoch[0.2] < 3.4  # weight 1.5: two passes half the time

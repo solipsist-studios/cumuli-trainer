@@ -38,6 +38,13 @@ def test_unknown_lr_key_is_an_error():
         build_config({**BASE, "lr": {"velocity": 1e-3}})
 
 
+def test_acceleration_lr_and_motion_degree_are_accepted():
+    cfg = build_config({**BASE, "lr": {"accelerations": 5e-5},
+                        "representation": {"name": "spacetime", "motion_degree": 2}})
+    assert cfg["lr"]["accelerations"] == 5e-5
+    assert cfg["representation"]["motion_degree"] == 2
+
+
 def test_required_keys():
     with pytest.raises(ConfigError):
         build_config({"source_path": "/x"})

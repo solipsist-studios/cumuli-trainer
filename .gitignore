@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+# the working record of what each module was written from; kept locally, not published
+PROVENANCE.md

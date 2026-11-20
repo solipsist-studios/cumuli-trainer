@@ -74,6 +74,9 @@ class DefaultStrategy(Strategy):
     def visibility(self, info) -> torch.Tensor:
         """[C, N] bool: camera c counts toward Gaussian n's statistics."""
         radii = info["radii"]
+        n = info["means2d"].shape[-2]
+        # Views rendered at their own times come as [C, 1, N, ...]: fold the batch dimension in.
+        radii = radii.reshape(-1, n, 2) if radii.shape[-1] == 2 and radii.dim() >= 3 else radii.reshape(-1, n)
         vis = (radii > 0).all(dim=-1) if radii.dim() == 3 else radii > 0
         return vis
 
@@ -83,7 +86,7 @@ class DefaultStrategy(Strategy):
         g = m2d.absgrad if self.absgrad else m2d.grad
         if g is None:
             return
-        g = g.clone()
+        g = g.clone().reshape(-1, *g.shape[-2:])
         g[..., 0] *= info["width"] / 2.0 * info["n_cameras"]
         g[..., 1] *= info["height"] / 2.0 * info["n_cameras"]
         vis = self.visibility(info).float()  # [C, N]

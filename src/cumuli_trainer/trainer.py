@@ -18,6 +18,11 @@ One step:
     loss.backward(); optimizers step
     strategy.step_post_backward(...)                densify / prune / relocate
 
+Views whose cameras took their pictures at different times (time_offset)
+are sliced per view and rendered together (renderer.render_each); a
+rolling-shutter view (readout_s > 0) is sliced with each Gaussian at its
+raw sensor row's time (shutter.py).
+
 There are no host synchronisations in a step except every ``log_every``
 steps (progress bar) and on the strategy's refine steps.
 """
@@ -39,7 +44,9 @@ from .config import dump, fps_from_times, loss_specs
 from .core import CORE_VERSION
 from .core import dataset as core_dataset
 from .core import ply as core_ply
-from .data import TrainData
+from .data import TrainData, capture_time
+from .shutter import slice_view
+from .time_offsets import CameraTimeOffsets
 from .evaluate import EvalSet
 from .losses.base import LossInputs
 from .representations.base import RepresentationContext
@@ -82,6 +89,10 @@ class Trainer:
         if not torch.cuda.is_available():
             raise RuntimeError("cumuli-train needs a CUDA device (gsplat rasterisation)")
         self.device = torch.device("cuda")
+        # gsplat inverts each view matrix with torch.inverse, which creates a cuSOLVER handle the first time it is
+        # used on a stream. Create it now, while the GPU is empty: a long window fills the card to within a few
+        # hundred MB, and creating it then, at the held-out evaluation, failed (CUSOLVER_STATUS_INTERNAL_ERROR).
+        torch.inverse(torch.eye(4, device=self.device))
         self._seed(cfg["seed"])
         os.makedirs(cfg["model_path"], exist_ok=True)
 
@@ -176,6 +187,16 @@ class Trainer:
             self.data.load_state_dict(ckpt.get("data"))
             if "rng" in ckpt:
                 self._restore_rng(ckpt["rng"])
+        self.time_offsets = None
+        if cfg["time_offsets"]["learn"]:
+            self.time_offsets = CameraTimeOffsets([c.label for c in train_cams], cfg["fps"], cfg["time_offsets"],
+                                                  self.device)
+            self.view_offset = self.time_offsets.view_index(self.data.cams, self.device)
+            if ckpt is not None:
+                self.time_offsets.load_state_dict(ckpt.get("time_offsets"))
+            to = cfg["time_offsets"]
+            self.log(f"learning capture-time corrections for {len(self.time_offsets.labels)} cameras after "
+                     f"{to['warmup']} steps (within +-{to['clamp_frames']:g} frame, reg {to['reg']:g})")
         bg = cfg["background"]
         self.random_bg = bg == "random"
         self.bg = None if self.random_bg else torch.tensor(
@@ -218,6 +239,49 @@ class Trainer:
         return min(self.cfg["sh_degree"], step // max(1, int(self.cfg["sh_degree_interval"])))
 
     # ------------------------------------------------------------------
+    def learning_offsets(self, step) -> bool:
+        return self.time_offsets is not None and step is not None and self.time_offsets.active(step)
+
+    def render_batch(self, batch, sh_degree: int, step: int | None = None):
+        """Render a batch's views, each at the time its camera took the picture.
+        When every view has the same time (a genlocked rig, or no sub-frame
+        timing in the dataset) this is one slice and one render, as before.
+        While capture-time corrections are being learned, each view's time is
+        its capture time plus its camera's correction, as a tensor, so the
+        photometric loss reaches the corrections.
+        A rolling-shutter view (readout_s > 0) slices each Gaussian at the time
+        its raw sensor row was read in that view (``shutter.slice_view``), so
+        it always renders through the per-view path.
+        Returns (rgb, alpha, info, the first view's sliced Gaussians)."""
+        vm, ks = self.data.viewmats[batch.index], self.data.Ks[batch.index]
+        w, h = self.data.width, self.data.height
+        views = batch.views if batch.views is not None else [int(i) for i in batch.index.tolist()]
+        rolling = [self.data.rolling[i] for i in views]
+        if self.learning_offsets(step):
+            corr = self.time_offsets.effective()[self.view_offset[batch.index]]
+            base = torch.tensor(list(batch.times), dtype=corr.dtype, device=corr.device)
+            gs = [slice_view(self.rep, t, sh_degree, self.data.cams[i], vm[c]) if r
+                  else self.rep.slice(t, sh_degree)
+                  for c, (t, i, r) in enumerate(zip((base + corr).unbind(0), views, rolling))]
+            rgb, alpha, info = self.renderer.render_each(gs, vm, ks, w, h)
+            return rgb, alpha, info, gs[0]
+        times = list(batch.times)
+        if len(set(times)) <= 1 and not any(rolling):
+            g = self.rep.slice(times[0] if times else batch.time, sh_degree)
+            rgb, alpha, info = self.renderer.render(g, vm, ks, w, h)
+            return rgb, alpha, info, g
+        sliced = {}
+        gs = []
+        for c, (t, i, r) in enumerate(zip(times, views, rolling)):
+            if r:
+                gs.append(slice_view(self.rep, t, sh_degree, self.data.cams[i], vm[c]))
+                continue
+            if t not in sliced:
+                sliced[t] = self.rep.slice(t, sh_degree)
+            gs.append(sliced[t])
+        rgb, alpha, info = self.renderer.render_each(gs, vm, ks, w, h)
+        return rgb, alpha, info, gs[0]
+
     def train_step(self, step: int):
         cfg = self.cfg
         for name in self.decayed:
@@ -226,9 +290,7 @@ class Trainer:
 
         batch = self.data.next()
         idx, imgs = batch.index, batch.images
-        g = self.rep.slice(batch.time, self.sh_degree_at(step))
-        rgb, alpha, info = self.renderer.render(
-            g, self.data.viewmats[idx], self.data.Ks[idx], self.data.width, self.data.height)
+        rgb, alpha, info, g = self.render_batch(batch, self.sh_degree_at(step), step)
         gt = imgs.float().div_(255.0)
         gt_alpha = gt[..., 3:4]
         gt_rgb = gt[..., :3] * gt_alpha
@@ -243,15 +305,21 @@ class Trainer:
         self.strategy.step_pre_backward(self.rep.params, self.optimizers, step, info)
         inputs = LossInputs(pred_rgb=rgb, pred_alpha=alpha, gt_rgb=gt_rgb, gt_alpha=gt_alpha,
                             params=self.rep.params, gaussians=g, info=info, step=step,
-                            extras={"crop": (batch.crop_size, batch.crop_origins)})
+                            extras={"crop": (batch.crop_size, batch.crop_origins)},
+                            view_weights=batch.weights)
         loss = None
         for _, weight, term in self.losses:
             value = weight * term(inputs)
             loss = value if loss is None else loss + value
+        learning = self.learning_offsets(step)
+        if learning:
+            loss = loss + self.time_offsets.penalty()
         loss.backward()
         for opt in self.optimizers.values():
             opt.step()
             opt.zero_grad(set_to_none=True)
+        if learning:
+            self.time_offsets.step()
         self.strategy.step_post_backward(self.rep.params, self.optimizers, step, info,
                                          lr=self.lr_at("means", step))
         with torch.no_grad():
@@ -284,12 +352,16 @@ class Trainer:
         sliced = {}
         with torch.enable_grad():
             for i, cam in enumerate(self.data.cams):
-                if cam.time not in sliced:
+                t = capture_time(cam)
+                # a rolling-shutter view has its own per-Gaussian times
+                key = ("view", i) if self.data.rolling[i] else t
+                if key not in sliced:
                     sliced.clear()
-                    g = self.rep.slice(cam.time, 0)
-                    sliced[cam.time] = (g.means.detach(), g.quats.detach(),
-                                        g.scales.detach(), g.opacities.detach())
-                means, quats, scales, opac = sliced[cam.time]
+                    with torch.no_grad():
+                        g = slice_view(self.rep, t, 0, cam, self.data.viewmats[i])
+                    sliced[key] = (g.means.detach(), g.quats.detach(),
+                                   g.scales.detach(), g.opacities.detach())
+                means, quats, scales, opac = sliced[key]
                 best = torch.maximum(best, view_contribution(
                     means, quats, scales, opac, self.data.viewmats[i:i + 1],
                     self.data.Ks[i:i + 1], self.data.width, self.data.height))
@@ -328,12 +400,15 @@ class Trainer:
             "strategy": self.strategy.state_dict(),
             "data": self.data.state_dict(),
             "rng": self._rng_state(),
+            "time_offsets": self.time_offsets.state_dict() if self.time_offsets is not None else None,
         }, path)
         return path
 
     def evaluate(self, step: int, bar=None) -> dict | None:
         if self.evalset is None:
             return None
+        # full-size test renders on top of training's buffers: give back the allocator's cached blocks first
+        torch.cuda.empty_cache()
         res = self.evalset.evaluate(self.rep, self.renderer, self.cfg["sh_degree"])
         m = res["mean"]
         line = progress.test_line(step, m["psnr_db"], m["ssim"], m["lpips"], len(res["views"]))
@@ -390,6 +465,11 @@ class Trainer:
             "time_duration": [self.time_min, self.time_max],
             "fps": cfg["fps"],
         }
+        if self.time_offsets is not None:
+            summary["camera_time_offsets_s"] = self.time_offsets.seconds()
+            spread = max(abs(v) for v in summary["camera_time_offsets_s"].values()) if summary["camera_time_offsets_s"] else 0.0
+            self.log(f"learned capture-time corrections: largest {spread * 1e3:.2f} ms ("
+                     + ", ".join(f"{l} {v * 1e3:+.2f}" for l, v in summary["camera_time_offsets_s"].items()) + " ms)")
         with open(os.path.join(cfg["model_path"], "training_summary.json"), "w") as fp:
             json.dump(summary, fp, indent=2)
         self.log(f"Training complete: {total} iterations in {summary['train_seconds']:.1f} s "

@@ -5,8 +5,8 @@ Gaussians (position, velocity, temporal envelope) with gsplat and writes the
 4D interchange PLY. Representations, densification strategies, loss terms and
 the renderer are plugins chosen by name in the run config.
 
-Clean-room: written from published papers, the gsplat API and Solipsist's own
-format spec. See `PROVENANCE.md`.
+Written from published papers, the gsplat API, Solipsist's own format spec and the
+design references listed in `ATTRIBUTIONS.md`, which also gives sources and licenses.
 
 ## Install
 
@@ -97,6 +97,19 @@ window is still charged by L1 and the opacity-mask term. On the 12-camera
 parity set this cut the step cost from 24 ms to 5 ms per view.
 `losses: {ssim: {weight: 0.2, crop: false}}` turns it off.
 
+A view can count for less. A `transforms_train.json` entry may carry
+`loss_weight` (default 1, at least 0), which a dataset uses to mark views it
+trusts less, such as generated views mixed in with real captures. The `l1`
+and `ssim` terms multiply each view's loss by its weight before averaging
+over the step's cameras, without renormalising, so a view at 0.5 adds half
+the gradient it would add alone and a view at 0 adds none. The silhouette
+term (`opacity_mask`) and the regularisers ignore it: they describe the
+geometry, not how far the view's pixels can be trusted. Weights are read at
+load time, logged when any differ from 1, and a dataset with none trains
+exactly as before. Reading the field needs cumuli-core 0.2.0 or newer
+(`Camera.loss_weight`); with v0.1.0 the trainer stops at load with an error
+rather than train every view at full weight.
+
 Time is normalised to [0, 1] over `time_duration` inside the trainer, so
 learning rates do not depend on clip length. The PLY is written in seconds.
 
@@ -146,11 +159,71 @@ temporal ones follow: a clone or relocated copy inherits its source's motion
 and window, and both halves of a split keep the parent's motion and window
 (the split offset is applied at `t_center`, where `means` lives).
 
+Motion is linear by default. `representation: {name: spacetime, motion_degree: 2}`
+adds a trained `accelerations` tensor, so `mean(t) = xyz + v*dt + a*dt*dt`, and
+writes `ax, ay, az` to the PLY. `a` is the raw `dt^2` coefficient, not
+half-acceleration (cumuli `docs/sogst-format.md` section 1). If every coefficient
+is exactly zero at export, the columns are left out and a warning is issued,
+because the spec does not allow emitting zeros as accel (section 4.8).
+
+A degree-1 checkpoint or `init_ply` can continue at degree 2, starting from zero
+acceleration. A degree-2 one refuses to load at degree 1, because dropping the
+term would change the motion.
+
+Measured against degree 1, with two runs of each: no clear gain. On the
+12-frame synthetic `dur_12` set PSNR was within run-to-run noise (39.71 and 39.81
+dB against 39.58 and 39.78), LPIPS slightly better (0.0058 against 0.0060) and
+about 15% fewer Gaussians were exported. On 2 s of Heidi, held-out cam05 PSNR was
+slightly lower (36.17 and 36.14 dB against 36.23 and 36.25), with LPIPS within
+noise and a `.sogst` about 15% larger (one pack of each).
+
+Motion only trains on Gaussians drawn away from their `t_center`, since the
+gradient of `v*dt` and `a*dt*dt` is zero at `dt = 0`. On a two-frame clip the
+initial window fades each Gaussian below gsplat's 1/255 cull at the other frame,
+so velocity and acceleration stay at zero at the default `t_init_div`.
+
 Initialisation: positions, colours and times from `points3d.ply`; spatial
 scale from the mean distance to the 3 nearest neighbours, computed within
 each timestamp so repeated copies of a static region do not shrink each
-other; velocity 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
+other; velocity and acceleration 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
 `t_init_div` 100; peak opacity 0.1.
+
+## Sub-Frame Timing
+
+Cameras that are not genlocked fire at slightly different moments. A
+`transforms_train.json` entry can say so, and the trainer renders each view at
+the moment its picture was taken. All of it is read from the dataset and costs
+nothing, and changes nothing, when the dataset has none of these keys.
+
+- `time_offset` (seconds, default 0): how much later than the nominal `time`
+  the camera took the picture. A step still groups views by `time`, slices the
+  Gaussians once per distinct capture time, and renders the views of one step
+  together. Held-out evaluation and the contribution pass use capture time too.
+- `readout_s` (seconds, default 0) and `raw_camera`: a rolling-shutter camera
+  reads its sensor rows over `readout_s`. With `readout_s > 0` each Gaussian is
+  rendered at the time the raw sensor row it projects to was read
+  (`cumuli_core.shutter`), one render per view. Output is bit-identical without
+  readouts.
+- `visit_weight` (default 1, above 0): an instant whose views carry weight `w`
+  is dealt `w` times per epoch (fractions by chance), so fast-moving frames get
+  more training. Unlike `loss_weight`, which scales how much a view's colour
+  loss counts, this changes how often the instant is visited.
+
+`time_offsets` in the config learns what the measured offsets leave over, one
+constant per physical camera, from the photometric loss. It is off unless
+`learn` is true:
+
+```yaml
+time_offsets: {learn: true, warmup: 8000, lr: 1.0e-4, reg: 0.01, clamp_frames: 0.5}
+```
+
+Each correction is clamped to `clamp_frames` of a frame by a tanh and made
+zero-mean across cameras, since a shift of every camera at once is a shift of
+the whole scene in time, which the photos cannot tell apart. Learning starts
+after `warmup` steps, and `reg` pulls the corrections back toward the measured
+offsets. They are saved in checkpoints and in `training_summary.json`
+(`camera_time_offsets_s`). Held-out test cameras are never trained, so they get
+no correction.
 
 ## Strategies
 
@@ -174,6 +247,7 @@ accumulate densely, without index lists, so there is no per-step sync.
 | sh0 | 2.5e-3 | |
 | shN | 1.25e-4 | sh0 / 20 |
 | velocities | 1.6e-4 x scene scale | units per normalised time; decays like means |
+| accelerations | 1.6e-4 x scene scale | motion_degree 2 only; units per normalised time squared; decays like means |
 | t_centers | 1e-3 | normalised time |
 | t_log_sigmas | 5e-3 | |
 
@@ -183,6 +257,8 @@ rig centre. The temporal values were chosen here. Velocity uses the position
 LR: a velocity step moves a Gaussian by (step x dt), and dt within its window
 is about one sigma (0.15 normalised at the default init), so a velocity step
 is a fraction of a position step and motion cannot outrun position.
+Acceleration starts from the same LR by the same argument: a step moves a
+Gaussian by (step x dt^2), a smaller fraction still.
 `t_centers` at 1e-3 moves a window by about a hundredth of a frame per step
 on a 12-frame clip. `t_log_sigmas` uses the scale LR because both are
 log-space widths.
