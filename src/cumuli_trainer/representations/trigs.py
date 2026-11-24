@@ -210,7 +210,8 @@ class TrigsRepresentation(Representation):
         """Peak opacity reached inside [time_min, time_max] (tau in [0, 1])."""
         tc = self.params["t_centers"]
         gap = torch.clamp(torch.maximum(-tc, tc - 1.0), min=0.0)
-        return torch.sigmoid(self.params["opacities"]) * torch.exp(-0.5 * (gap / torch.exp(self._log_sigmas())) ** 2)
+        # the format's weight (cumuli_core.trigs.temporal_weight), the same one slice() applies
+        return torch.sigmoid(self.params["opacities"]) * _trigs().temporal_weight(gap, torch.exp(self._log_sigmas()))
 
     # -- output -----------------------------------------------------------
     def to_interchange(self, min_peak_opacity: float = 0.0, keep=None) -> dict:
