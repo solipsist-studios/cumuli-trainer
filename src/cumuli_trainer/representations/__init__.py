@@ -2,5 +2,5 @@
 # Required Notice: Copyright 2026 Solipsist Studios Inc. (https://solipsist.studio)
 """Representations. Importing this package registers the built-ins."""
 
-from . import spacetime  # noqa: F401
+from . import spacetime, trigs  # noqa: F401
 from .base import Representation, RepresentationContext, SlicedGaussians  # noqa: F401

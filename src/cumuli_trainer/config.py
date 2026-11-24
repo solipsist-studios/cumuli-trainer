@@ -68,6 +68,12 @@ DEFAULT_LR = {
     # exponentially to means * means_final_ratio.
     "means": 1.6e-4,
     "means_final_ratio": 0.01,
+    # trigs representation only (ours: the paper says "same settings as 3DGS" and gives no figures). anchors and
+    # zeta_t are scene units, multiplied by the scene scale and decayed like means; zeta_r is radians per
+    # normalised time. They start where the spacetime velocities do.
+    "anchors": 1.6e-4,
+    "zeta_t": 1.6e-4,
+    "zeta_r": 2e-3,
     "scales": 5e-3,
     "quats": 1e-3,
     "opacities": 5e-2,

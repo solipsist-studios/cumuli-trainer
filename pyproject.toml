@@ -33,6 +33,7 @@ cumuli-train = "cumuli_trainer.cli:main"
 # package would use, so the loader has one code path.
 [project.entry-points."cumuli_trainer.representations"]
 spacetime = "cumuli_trainer.representations.spacetime:SpacetimeRepresentation"
+trigs = "cumuli_trainer.representations.trigs:TrigsRepresentation"
 
 [project.entry-points."cumuli_trainer.strategies"]
 mcmc = "cumuli_trainer.strategies.mcmc:MCMCStrategy"
@@ -44,6 +45,8 @@ ssim = "cumuli_trainer.losses.photometric:SSIMLoss"
 opacity_mask = "cumuli_trainer.losses.masks:OpacityMaskLoss"
 opacity_reg = "cumuli_trainer.losses.regularizers:OpacityReg"
 scale_reg = "cumuli_trainer.losses.regularizers:ScaleReg"
+trigs_motion = "cumuli_trainer.losses.trigs:TrigsMotion"
+trigs_rigid = "cumuli_trainer.losses.trigs:TrigsRigid"
 
 [project.entry-points."cumuli_trainer.renderers"]
 gsplat = "cumuli_trainer.renderers.gsplat_renderer:GsplatRenderer"
