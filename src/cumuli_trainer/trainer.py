@@ -377,6 +377,14 @@ class Trainer:
             self.log(f"visibility: {int((~seen).sum()):,} of {self.rep.num_gaussians:,} Gaussians "
                      f"contribute under {min_contrib:g} px to every training view; dropped")
             keep = seen if keep is None else (keep & seen)
+        if hasattr(self.rep, "export_checkpoint"):
+            # a representation the interchange PLY cannot hold writes its own file (trigs: trigs_ckpt.pt)
+            path, n = self.rep.export_checkpoint(self.cfg["model_path"], step, step == self.cfg["iterations"],
+                                                 float(self.cfg["export_min_opacity"]), keep=keep)
+            self.log(f"wrote {path}: {n:,} of {self.rep.num_gaussians:,} Gaussians "
+                     f"(peak opacity >= {float(self.cfg['export_min_opacity']):.4g}, inside bounds, seen)")
+            self.exported_count = n
+            return path
         fields = self.rep.to_interchange(float(self.cfg["export_min_opacity"]), keep=keep)
         n = core_ply.write_sogst_ply(path, fields, self.time_min, self.time_max,
                                      self.cfg["fps"], generator="cumuli-trainer")
