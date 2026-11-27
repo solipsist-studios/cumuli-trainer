@@ -2,8 +2,9 @@
 
 A 4D Gaussian splatting trainer for the Cumuli pipeline. It trains spacetime
 Gaussians (position, velocity, temporal envelope) with gsplat and writes the
-4D interchange PLY. Representations, densification strategies, loss terms and
-the renderer are plugins chosen by name in the run config.
+4D interchange PLY. A second representation, `trigs`, trains rigid-body motion
+(see TRiGS representation). Representations, densification strategies, loss
+terms and the renderer are plugins chosen by name in the run config.
 
 Written from published papers, the gsplat API, Solipsist's own format spec and the
 design references listed in `ATTRIBUTIONS.md`, which also gives sources and licenses.
@@ -15,8 +16,8 @@ Into an environment that already has PyTorch with CUDA and gsplat 1.5.3
 replacing either:
 
 ```bash
-pip install --no-deps "cumuli-core @ git+https://github.com/solipsist-studios/cumuli-core.git@v0.1.0"
-pip install --no-deps "cumuli-trainer @ git+https://github.com/solipsist-studios/cumuli-trainer.git@v0.1.0"
+pip install --no-deps "cumuli-core @ git+https://github.com/solipsist-studios/cumuli-core.git@v0.2.0"
+pip install --no-deps "cumuli-trainer @ git+https://github.com/solipsist-studios/cumuli-trainer.git@v0.2.0"
 pip install numpy scipy pyyaml tqdm pillow torchmetrics lpips
 ```
 
@@ -50,7 +51,8 @@ sh_degree: 2
 Full key list and defaults: the docstring of `cumuli_trainer/config.py`.
 Unknown keys are an error.
 
-Outputs in `model_path`:
+Outputs in `model_path` (the `trigs` representation writes its own file in
+place of `splat_4d.ply`):
 
 - `splat_4d.ply`: the interchange PLY (cumuli `docs/sogst-format.md` section
   7) with `time_min`/`time_max` = `time_duration` and `fps`. Written at every
@@ -119,9 +121,9 @@ Four kinds, each chosen by name in the config:
 
 | kind | config key | built-ins | interface |
 |---|---|---|---|
-| representation | `representation:` | `spacetime` | `representations/base.py` |
+| representation | `representation:` | `spacetime` (default), `trigs` | `representations/base.py` |
 | strategy | `strategy:` | `mcmc` (default), `default` | `strategies/base.py` |
-| loss | `losses:` | `l1`, `ssim`, `opacity_mask`, `opacity_reg`, `scale_reg` | `losses/base.py` |
+| loss | `losses:` | `l1`, `ssim`, `opacity_mask`, `opacity_reg`, `scale_reg`, `trigs_motion`, `trigs_rigid` | `losses/base.py` |
 | renderer | `renderer:` | `gsplat` | `renderers/base.py` |
 
 A plugin section is a name or a mapping with `name` plus the plugin's own
@@ -188,6 +190,31 @@ each timestamp so repeated copies of a static region do not shrink each
 other; velocity and acceleration 0; `t_sigma = sqrt(duration / t_init_div)` seconds with
 `t_init_div` 100; peak opacity 0.1.
 
+## TRiGS representation
+
+`representation: trigs` trains the model of the TRiGS paper (arXiv 2604.00538):
+each Gaussian rotates and translates about an anchor, with a twist that follows
+a quadratic Bezier curve inside a temporal window. The slice is
+`cumuli_core.trigs.slice_at`, so it needs cumuli-core 0.2.0 or newer. Its two
+motion losses are off unless the config names them. The paper's weights are:
+
+```yaml
+representation: trigs
+losses: {trigs_motion: 1.0e-4, trigs_rigid: 1.0}
+```
+
+It writes `trigs_ckpt.pt` instead of `splat_4d.ply`, because the interchange PLY
+cannot hold this motion (earlier `save_iterations` steps write
+`trigs_<step>.pt`). The file uses seconds and xyzw quaternions, in the layout
+the Open4DGS-Core packager reads. `init_ply` can seed a run from a spacetime
+interchange PLY, carrying velocity over as translation.
+
+Where the paper is silent the choices are ours: the learning rates, the relative
+anchor, the initial rotation axis, and averaging the two losses over Gaussians.
+The module docstrings give the details. The opacity weight is the
+`.trigsbin` format's, `max((gamma - 0.05) / 0.95, 0)`, not the paper's plain
+temporal Gaussian `gamma`.
+
 ## Sub-Frame Timing
 
 Cameras that are not genlocked fire at slightly different moments. A
@@ -250,6 +277,9 @@ accumulate densely, without index lists, so there is no per-step sync.
 | accelerations | 1.6e-4 x scene scale | motion_degree 2 only; units per normalised time squared; decays like means |
 | t_centers | 1e-3 | normalised time |
 | t_log_sigmas | 5e-3 | |
+| anchors | 1.6e-4 x scene scale | `trigs` only; decays like means |
+| zeta_t | 1.6e-4 x scene scale | `trigs` only; translation twists; decays like means |
+| zeta_r | 2e-3 | `trigs` only; rotation twists, radians per normalised time |
 
 The spatial values are the 3DGS paper's (section 7.1) as used by gsplat's
 simple_trainer. Scene scale is 1.1 x the largest camera distance from the

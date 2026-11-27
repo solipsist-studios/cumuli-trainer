@@ -4,6 +4,10 @@
 
 Requires cumuli-core 0.2.0.
 
+- TRiGS representation: `representation: trigs` trains rigid-body motion about
+  an anchor (arXiv 2604.00538), with the `trigs_motion` and `trigs_rigid`
+  losses. It writes `trigs_ckpt.pt`, in the layout the Open4DGS-Core packager
+  reads, instead of `splat_4d.ply`. See the README section TRiGS representation.
 - Degree-2 motion: `representation: {name: spacetime, motion_degree: 2}` adds
   a trained `accelerations` tensor and writes `ax, ay, az` to the PLY. The
   default stays degree 1. A degree-1 checkpoint can continue at degree 2.
