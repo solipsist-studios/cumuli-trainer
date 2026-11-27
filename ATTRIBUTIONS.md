@@ -13,6 +13,7 @@ projects below. No third-party source code is included in this repository.
 | Kheradmand et al., "3D Gaussian Splatting as Markov Chain Monte Carlo", 2024 | MCMC densification, relocation, and the opacity and scale regularisers |
 | Xie et al., "PhysGaussian: Physics-Integrated 3D Gaussians for Generative Dynamics", CVPR 2024 | The anisotropy regulariser |
 | Lee, Lee, Lee, Lee, Jeong, Kim, Song, Lee, Ko, Park, Park, "Optimized Minimal 4D Gaussian Splatting for Efficient Dynamic Scene Representation", arXiv:2510.03857, 2025 (https://arxiv.org/abs/2510.03857) | The OMG4 baseline that the parity runs in `configs/dur12_parity.yaml` compare against |
+| Yeom, Nam, Choi, Lee, Kim, Park, Kim, Yun, Kong, Kang, "TRiGS: Temporal Rigid-Body Motion for Scalable 4D Gaussian Splatting", arXiv:2604.00538, 2026 (https://arxiv.org/abs/2604.00538) | The `trigs` representation and its two motion losses |
 | Wang, Bovik, Sheikh, Simoncelli, "Image Quality Assessment: From Error Visibility to Structural Similarity", IEEE TIP 2004 | SSIM |
 
 ## Software
@@ -35,6 +36,15 @@ projects below. No third-party source code is included in this repository.
   rolling-shutter time convention, rolling-shutter times taken from each
   Gaussian's projected sensor row (`shutter.py`), and giving fast-moving frames
   more training visits (`data.py`).
+- **Open4DGS-Core** (MIT, https://github.com/ASU-NEM-Labs/open4dgs-core): the
+  `trigs` representation exports the tensor names and checkpoint layout that
+  its packager reads.
+- **animated-sog** (MIT, https://github.com/arrival-space/animated-sog): its
+  format document gives the temporal opacity weight that the `trigs`
+  representation applies, through cumuli-core.
+
+  No code from either is included, and no Open4DGS trainer code was read for
+  the `trigs` representation.
 - **PyTorch**, **torchmetrics** and **lpips**: the tensor library and the
   evaluation metrics, used as libraries.
 
@@ -45,7 +55,7 @@ projects below. No third-party source code is included in this repository.
   formats, the render settings and the evaluation conventions the trainer shares
   with the rest of the pipeline.
 - cumuli-core: the shared library for cameras, datasets, the PLY format, the
-  spacetime slice, rolling-shutter geometry and metrics.
+  spacetime and TRiGS slices, rolling-shutter geometry and metrics.
 - comfyui-cumuli `cumuli_bridge/train.py`: the progress-line patterns in
   `progress.py` and `tests/test_progress.py`.
 

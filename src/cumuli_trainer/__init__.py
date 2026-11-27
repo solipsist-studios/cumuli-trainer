@@ -3,7 +3,7 @@
 """cumuli-trainer: a 4D Gaussian splatting trainer with pluggable
 representations, strategies, losses and renderers."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def load_builtin_plugins() -> None:
